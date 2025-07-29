@@ -331,24 +331,34 @@ async function fetchAllVendorData() {
     const cacheTimestampKey = 'cachedVendorsTimestamp';
     const cacheTTL = 1000 * 60 * 30; // 30 minutes
 
-   const cachedData = sessionStorage.getItem(cacheKey);
-const cachedTime = sessionStorage.getItem(cacheTimestampKey);
+    console.log("🔍 Checking vendor data cache...");
 
+    const cachedData = sessionStorage.getItem(cacheKey);
+    const cachedTime = sessionStorage.getItem(cacheTimestampKey);
 
     const isValidCache = cachedData && cachedTime && (Date.now() - parseInt(cachedTime)) < cacheTTL;
 
     if (isValidCache) {
+        console.log("✅ Using cached vendor data (still valid).");
         vendorData = JSON.parse(cachedData);
+        console.log(`📦 Cached vendors loaded: ${vendorData.length} records`);
         return;
+    } else {
+        console.log("⚠️ Cache is empty or expired. Fetching from Airtable...");
     }
 
     try {
         let allRecords = [];
         let offset = null;
+        let requestCount = 0;
 
         do {
             let url = `https://api.airtable.com/v0/${VendorBaseName}/${VendorTableName}?pageSize=100`;
             if (offset) url += `&offset=${offset}`;
+
+            requestCount++;
+            console.log(`📡 Fetching batch #${requestCount} from Airtable...`);
+            console.log(`➡️ URL: ${url}`);
 
             const response = await fetch(url, {
                 headers: {
@@ -362,8 +372,16 @@ const cachedTime = sessionStorage.getItem(cacheTimestampKey);
             }
 
             const data = await response.json();
+            console.log(`📥 Received ${data.records.length} records`);
+
             allRecords = allRecords.concat(data.records);
             offset = data.offset;
+
+            if (offset) {
+                console.log("➡️ More records available, continuing with offset:", offset);
+            } else {
+                console.log("✅ All records fetched, no more offset.");
+            }
 
         } while (offset);
 
@@ -372,15 +390,21 @@ const cachedTime = sessionStorage.getItem(cacheTimestampKey);
             email: record.fields['Email'] || null,
         }));
 
-        vendorData.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+        console.log(`📊 Total vendors after mapping: ${vendorData.length}`);
 
-        localStorage.setItem(cacheKey, JSON.stringify(vendorData));
-        localStorage.setItem(cacheTimestampKey, Date.now().toString());
+        vendorData.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+        console.log("🔤 Vendors sorted alphabetically by name.");
+
+        sessionStorage.setItem(cacheKey, JSON.stringify(vendorData));
+        sessionStorage.setItem(cacheTimestampKey, Date.now().toString());
+
+        console.log("💾 Vendor data cached in sessionStorage.");
 
     } catch (error) {
         console.error("❌ Error fetching vendor data:", error);
     }
 }
+
 document.getElementById("clearCacheBtn")?.addEventListener("click", () => {
     sessionStorage.removeItem("cachedBidNames");
     sessionStorage.removeItem("cachedBidNamesTimestamp");
@@ -1491,7 +1515,7 @@ mike.raszmann@vanirinstalledsales.com
 
 <p><strong>Subject:</strong> Project Awarded – <span class="builderContainer"></span> | <span class="subdivisionContainer"></span></p>
         <p>Hello <strong><span class="vendorNameContainer"></span></strong>,</p>
-        <p>We wanted to notify you that <strong>Vanir Installed Sales</strong> <strong><span class="branchContainer"></span></strong> has secured the bid for <strong><span class="subdivisionContainer"></span></strong> project with <strong><span class="builderContainer"></span></strong> in <strong><span class="branchContainer"></span></strong>.</p>
+        <p>We wanted to notify you that <strong>Vanir Installed Sales</strong> <strong><span class="branchContainer"></span></strong> has secured the bid for <strong><span class="subdivisionContainer"></span></strong> project with <strong><span class="builderContainer"></span></strong>.</p>
 
         <p><strong>Project Summary:</strong></p>
         <ul>
@@ -1858,7 +1882,7 @@ const vendorSubject = `Project Awarded | ${subdivision} | ${builder}`;
 const vendorBody = `
 Hello,
 
-We're excited to share that Vanir ${branch} will be partnering with ${builder} in ${subdivision}.
+We're excited to share that Vanir ${branch} will be partnering with ${builder}.
 
 Project Summary:
 - Project Type: ${projectType}

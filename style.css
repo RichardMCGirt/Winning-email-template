@@ -348,7 +348,7 @@ h4 {
 }
 /* Scrollable Dropdown */
 .autocomplete-dropdown {
-    max-height: 200px; /* Limit the height of the dropdown */
+    max-height: 500px; /* Limit the height of the dropdown */
     overflow-y: auto; /* Enable vertical scrolling */
     border: 1px solid #ccc;
     border-radius: 4px;
