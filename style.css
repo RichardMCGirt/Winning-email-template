@@ -529,3 +529,42 @@ body.dark-mode p {
   display: flex;
   align-items: center;
 }
+.suggestions-box {
+    border: 1px solid #ccc;
+    max-height: 200px;
+    overflow-y: auto;
+    background: white;
+    position: absolute;
+    width: 200px;
+    z-index: 1000;
+}
+.suggestion-item {
+    padding: 8px;
+    cursor: pointer;
+}
+.suggestion-item:hover,
+.suggestion-item.selected {
+    background: #007bff;
+    color: white;
+}
+.suggestion-item {
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.suggestion-item.selected {
+  background: #007bff;  /* Blue highlight */
+  color: #fff;          /* White text */
+}
+
+.suggestion-item:hover {
+  background: #e0e0e0;  /* Light gray hover */
+}
+.autocomplete-option.highlighted {
+  background-color: #007bff;
+  color: white;
+}
+.autocomplete-option.selected {
+    background-color: #007BFF;  /* blue highlight */
+    color: white;
+}
