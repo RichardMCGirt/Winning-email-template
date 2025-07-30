@@ -3,6 +3,12 @@
 const airtableApiKey = 'patCnUsdz4bORwYNV.5c27cab8c99e7caf5b0dc05ce177182df1a9d60f4afc4a5d4b57802f44c65328';
 const bidBaseName = 'appK9gZS77OmsIK50';
 const bidTableName = 'tblQo2148s04gVPq1';
+const viewId = "viwTnwtcQkhpZEJ3q";
+const baseId = "appK9gZS77OmsIK50";
+const tableId = "tblQo2148s04gVPq1";
+const PAGE_SIZE = 100; // max allowed
+let offset = null;
+
 const subcontractorBaseName = 'applsSm4HgPspYfrg';
 const subcontractorTableName = 'tblX03hd5HX02rWQu';
 const VendorBaseName = 'appeNSp44fJ8QYeY5';
@@ -2154,20 +2160,13 @@ function renderBidInputImmediately() {
     emailContainer.prepend(bidAutocompleteInput);
 }
 
-let offset = null; // Offset for Airtable pagination
-const PAGE_SIZE = 20; // Adjust as needed
-
-// Function to fetch paginated bid names from Airtable
 async function fetchLazyBidSuggestions(query = "", isInitialLoad = false) {
     try {
-        let url = `https://api.airtable.com/v0/${bidBaseName}/${bidTableName}?pageSize=${PAGE_SIZE}`;
+        let url = `https://api.airtable.com/v0/${baseId}/${tableId}?view=${viewId}&pageSize=${PAGE_SIZE}&fields[]=Bid%20Name`;
         if (offset) url += `&offset=${offset}`;
-if (query) url += `&filterByFormula=AND(SEARCH("${query}", {Bid Name}), {Outcome} = 'Win')`;
 
         const response = await fetch(url, {
-            headers: {
-                Authorization: `Bearer ${airtableApiKey}`,
-            },
+            headers: { Authorization: `Bearer ${airtableApiKey}` }
         });
 
         if (!response.ok) {
@@ -2177,24 +2176,33 @@ if (query) url += `&filterByFormula=AND(SEARCH("${query}", {Bid Name}), {Outcome
 
         const data = await response.json();
 
-        // Extract bid names from records
-        const newSuggestions = data.records
+        // Extract bid names
+        let newSuggestions = data.records
             .map(record => record.fields["Bid Name"])
             .filter(Boolean);
 
-        if (isInitialLoad) bidNameSuggestions = []; // Clear only if initial load
+        // Apply search filtering client-side (faster than Airtable SEARCH())
+        if (query) {
+            const lowerQ = query.toLowerCase();
+            newSuggestions = newSuggestions.filter(name => 
+                name.toLowerCase().includes(lowerQ)
+            );
+        }
 
-        // Add new suggestions to global list (avoiding duplicates)
-        bidNameSuggestions.push(...newSuggestions);
+        if (isInitialLoad) bidNameSuggestions = []; // reset on initial load
+
+        // Deduplicate while adding
+        bidNameSuggestions.push(...newSuggestions.filter(n => !bidNameSuggestions.includes(n)));
 
         offset = data.offset || null;
 
-        return newSuggestions; // ✅ Return only new bid names as strings
+        return newSuggestions;
     } catch (error) {
         console.error("Error during lazy loading of bid suggestions:", error);
         return [];
     }
 }
+
 
 // Debounce utility to limit API calls
 function debounce(func, delay) {
@@ -2322,35 +2330,39 @@ function initializeBidAutocomplete() {
       dropdown.style.display = filtered.length > 0 ? "block" : "none";
     }, 300));
 
-    // Keyboard navigation
-    bidInput.addEventListener("keydown", async (e) => {
-      const options = dropdown.querySelectorAll(".autocomplete-option");
+   // Keyboard navigation
+bidInput.addEventListener("keydown", async (e) => {
+  const options = dropdown.querySelectorAll(".autocomplete-option");
+
+  if (["ArrowDown", "ArrowUp"].includes(e.key)) {
+    if (options.length > 0) {
+      e.preventDefault(); // 🚫 stop page from scrolling
 
       if (e.key === "ArrowDown") {
-        e.preventDefault();
-        if (options.length === 0) return;
-
         highlightedIndex = (highlightedIndex + 1) % options.length;
-        highlightOption(options, highlightedIndex);
-
       } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        if (options.length === 0) return;
-
         highlightedIndex = (highlightedIndex - 1 + options.length) % options.length;
-        highlightOption(options, highlightedIndex);
-
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        if (highlightedIndex >= 0 && options[highlightedIndex]) {
-          const selected = options[highlightedIndex];
-          bidInput.value = selected.textContent;
-          dropdown.innerHTML = "";
-          dropdown.style.display = "none";
-          await fetchDetailsByBidName(selected.textContent);
-        }
       }
-    });
+
+      highlightOption(options, highlightedIndex);
+
+      // Ensure highlighted option is always visible
+      options[highlightedIndex].scrollIntoView({
+        block: "nearest",
+        inline: "nearest"
+      });
+    }
+  } else if (e.key === "Enter") {
+    if (highlightedIndex >= 0 && options[highlightedIndex]) {
+      e.preventDefault(); // prevent form submit
+      const selected = options[highlightedIndex];
+      bidInput.value = selected.textContent;
+      dropdown.innerHTML = "";
+      dropdown.style.display = "none";
+      await fetchDetailsByBidName(selected.textContent);
+    }
+  }
+});
 
     bidInput.dataset.listenerAttached = "true";
   }
@@ -2358,18 +2370,33 @@ function initializeBidAutocomplete() {
   window.__autocompleteInitialized = true;
 
   // Helper: Highlight an option
-  function highlightOption(options, index) {
-    options.forEach(opt => {
+ function highlightOption(options, index) {
+  options.forEach((opt, i) => {
+    if (i === index) {
+      opt.style.setProperty("background-color", "#007BFF", "important");
+      opt.style.setProperty("color", "white", "important");
+      opt.scrollIntoView({ block: "nearest" }); // keep visible
+    } else {
       opt.style.removeProperty("background-color");
       opt.style.removeProperty("color");
-    });
-    const option = options[index];
-    option.style.setProperty("background-color", "#007BFF", "important");
-    option.style.setProperty("color", "white", "important");
-    option.scrollIntoView({ block: "nearest" });
+    }
+  });
+}
+function lockBodyScroll(lock) {
+  if (lock) {
+    document.body.style.overflow = "hidden";
+  } else {
+    document.body.style.overflow = "";
   }
+}
 
+// When dropdown opens:
+dropdown.style.display = "block";
+lockBodyScroll(true);
 
+// When dropdown closes:
+dropdown.style.display = "none";
+lockBodyScroll(false);
 
 
     // ✅ Add scroll listener INSIDE where `dropdown` is defined
@@ -2439,8 +2466,8 @@ async function waitForElement(selector, timeout = 5000) {
         let tries = 0;
 
         const check = () => {
-            const element = document.querySelector(selector); // ✅ returns a single element
-            if (element) {
+            const element = document.querySelector(selector); 
+                        if (element) {
                 resolve(element);
             } else if (++tries >= maxTries) {
                 reject(new Error(`Timeout waiting for ${selector}`));
