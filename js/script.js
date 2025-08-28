@@ -608,153 +608,222 @@ function updateMultipleSpans(selector, value) {
     });
 }
 
-async function fetchDetailsByBidName(bidName) {
-    clearAllDynamicSpans();
-
-const filterFormula = `AND({Bid Name} = "${bidName.trim()}", {Outcome}='Win')`;
-const records = await fetchAirtableData(bidBaseName, bidTableName, '', filterFormula);
-
-console.log("🔍 Matching bid records:", records.map(r => ({
-  bid: r.fields['Bid Name'],
-  branch: r.fields['Branch'],
-  id: r.id
-})));
-
-const exactMatch = records.find(rec =>
-  (rec.fields['Bid Name'] || '').trim().toLowerCase() === bidName.trim().toLowerCase()
-);
-
-if (!exactMatch) {
-  console.warn("❌ No exact match found for:", bidName);
-  return;
+// ---------- helpers (paste these once) ----------
+function escapeForAirtableFilter(s = "") {
+  // Airtable filterByFormula needs inner quotes escaped
+  return String(s).replace(/"/g, '\\"');
 }
 
-const fields = exactMatch.fields;
-console.log("✅ Using branch:", fields['Branch']);
+function normalizeString(s) {
+  return typeof s === "string" ? s.trim().toLowerCase() : "";
+}
 
-    if (records.length > 0) {
-        const fields = records[0].fields;
-        const acmEmail = fields["Field's Email"] || '';
-        const builder = fields['Builder'] || 'Unknown Builder';
-        const gmEmail = fields['GM Email'] ? fields['GM Email'][0] : 'Branch Staff@Vanir.com';
-        const branch = fields['Branch'] || 'Unknown Branch';
-        const projectType = fields['Project Type'] || '';
-        const materialType = fields['Material Type'] || '';
-        const numberOfLots = fields['Number of Lots'] || '';
-        const anticipatedStartDate = fields['Anticipated Start Date'] || '';
-        const AnticipatedDuration = fields['Anticipated Duration'];
-        const materialsNeeded = fields['Materials Needed'] || '';
+function getFieldStr(fields, key) {
+  // Returns a string for: undefined | "" | [] | ["val"] | "val"
+  if (!fields || typeof fields !== "object") return "";
+  const v = fields[key];
+  if (Array.isArray(v)) return v[0] ?? "";
+  if (v == null) return "";
+  return String(v);
+}
 
-        if (branch) {
-            await fetchSubcontractorSuggestions(branch);
-        } else {
-            console.warn("⚠️ No branch found in bid details, skipping subcontractor fetch.");
-        }
+function getArrayOrEmpty(fields, key) {
+  const v = fields?.[key];
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string" && v.length) return [v];
+  return [];
+}
 
-        // 🔁 Vendor Matching Logic
-        let vendorRaw = fields['vendor'] || '';
-        if (Array.isArray(vendorRaw)) {
-            vendorRaw = vendorRaw[0] || '';
-        }
-        const vendorNormalized = typeof vendorRaw === 'string' ? vendorRaw.toLowerCase().trim() : '';
+// ---------- SAFE replacement for fetchDetailsByBidName ----------
+async function fetchDetailsByBidName(bidNameInput) {
+  try {
+    // Allow being called with either a string or an autocomplete "suggestion" object
+    const bidNameRaw = typeof bidNameInput === "string"
+      ? bidNameInput
+      : (bidNameInput?.companyName || bidNameInput?.text || "");
 
-        let matchingVendors = vendorData.filter(v =>
-            v.name?.toLowerCase().trim() === vendorNormalized
-        );
-
-        if (matchingVendors.length === 0) {
-            const firstWord = vendorNormalized.split(" ")[0];
-            matchingVendors = vendorData.filter(v => {
-                const name = v.name?.toLowerCase() || '';
-                const email = v.email?.toLowerCase() || '';
-                return name.includes(firstWord) || email.includes(firstWord);
-            });
-        }
-
-        // ✅ Wait for elements to exist
-        await waitForElement('.gmNameContainer');
-
-       if (matchingVendors.length === 1) {
-    const matched = matchingVendors[0];
-    window.currentVendorEmail = matched.email;
-    updateMultipleSpans('.bidNameContainer', bidName);
-    updateMultipleSpans('.vendorNameContainer', matched.name);
-    updateMultipleSpans('.vendorEmailWrapper', ` <${matched.email}>`);
-
-        } else if (matchingVendors.length > 1) {
-            const branchText = document.querySelector('.branchContainer')?.textContent.trim().toLowerCase();
-            if (branchText) {
-                const narrowedMatches = matchingVendors.filter(vendor =>
-                    vendor.name?.toLowerCase().includes(branchText) ||
-                    vendor.email?.toLowerCase().includes(branchText)
-                );
-
-                if (narrowedMatches.length === 1) {
-                    const matched = narrowedMatches[0];
-                    window.currentVendorEmail = matched.email;
-
-                    document.querySelectorAll('.vendorNameContainer').forEach(el => el.textContent = matched.name);
-                    document.querySelectorAll('.vendorEmailWrapper').forEach(el => el.textContent = ` <${matched.email}>`);
-                    return;
-                } else if (narrowedMatches.length > 1) {
-                    renderMatchingVendorsToDropdown(matchingVendors);
-                    return;
-                }
-            }
-            renderMatchingVendorsToDropdown(matchingVendors);
-        } else {
-            console.warn(`⚠️ No close vendor matches for "${vendorRaw}" — showing all vendors`);
-            renderMatchingVendorsToDropdown([...matchingVendors]);
-        }
-
-        // Set remaining fields to spans
-       const gm = fields['GM Named']
-    ? (Array.isArray(fields['GM Named']) ? fields['GM Named'][0] : fields['GM Named'])
-    : deriveNameFromEmail(gmEmail);
-
-// ✅ Use helper for all span population
-updateMultipleSpans('.gmNameContainer', gm);
-updateMultipleSpans('.gmEmailContainer', gmEmail);
-updateMultipleSpans('.acmEmailContainer', acmEmail);
-
-window.currentVendorEmail = vendoremail;
-
-        updateTemplateText(
-            bidName,
-            builder,
-            gmEmail,
-            branch,
-            projectType,
-            materialType,
-            numberOfLots,
-            anticipatedStartDate,
-            vendorRaw,
-            AnticipatedDuration,
-            gm,
-            vendoremail,
-            acmEmail
-        );
-
-        updateSubcontractorAutocomplete();
-
-        return {
-            builder,
-            gmEmail,
-            branch,
-            projectType,
-            materialType,
-            numberOfLots,
-            anticipatedStartDate,
-            vendorRaw,
-            AnticipatedDuration,
-            gm,
-            vendoremail,
-        };
-    } else {
-        console.warn("No bid found for the given name:", bidName);
-        return {};
+    const bidName = (bidNameRaw || "").trim();
+    if (!bidName) {
+      console.warn("⚠️ fetchDetailsByBidName called without a bid name.");
+      return {};
     }
+
+    // Clear UI placeholders safely (uses your existing util if present)
+    if (typeof clearAllDynamicSpans === "function") {
+      clearAllDynamicSpans();
+    }
+
+    // Build a *safe* filterByFormula
+    // Your code previously: AND({Bid Name} = "<bid>", {Outcome}='Win')
+    const safeBid = escapeForAirtableFilter(bidName);
+    const filterFormula = `AND({Bid Name} = "${safeBid}", {Outcome}='Win')`;
+
+    // Pull records (uses your existing fetchAirtableData)
+    const records = await fetchAirtableData(
+      typeof bidBaseName !== "undefined" ? bidBaseName : baseId,
+      typeof bidTableName !== "undefined" ? bidTableName : tableId,
+      "",
+      filterFormula
+    );
+
+    // If nothing back, bail quietly
+    if (!Array.isArray(records) || records.length === 0) {
+      console.warn("❌ No records returned for bid:", bidName);
+      return {};
+    }
+
+    // Exact match (case-insensitive, trimmed)
+    const exact = records.find(r => normalizeString(r?.fields?.["Bid Name"]) === normalizeString(bidName));
+    const chosen = exact || records[0];
+    const fields = chosen?.fields || {};
+
+    // Extract fields **safely** (strings even if Airtable returns arrays or blanks)
+    const builder               = getFieldStr(fields, "Builder") || "Unknown Builder";
+    const gmEmailRaw            = getArrayOrEmpty(fields, "GM Email");
+    const gmEmail               = gmEmailRaw[0] || "Branch Staff@Vanir.com";
+    const branch                = getFieldStr(fields, "Branch") || "Unknown Branch";
+    const projectType           = getFieldStr(fields, "Project Type");
+    const materialType          = getFieldStr(fields, "Material Type");
+    const numberOfLots          = getFieldStr(fields, "Number of Lots");
+    const anticipatedStartDate  = getFieldStr(fields, "Anticipated Start Date");
+    const anticipatedDuration   = getFieldStr(fields, "Anticipated Duration");
+    const materialsNeeded       = getFieldStr(fields, "Materials Needed");
+    const acmEmail              = getFieldStr(fields, "Field's Email"); // from your original code
+    const gmNamed               = getFieldStr(fields, "GM Named");
+    const gm                    = gmNamed || (typeof deriveNameFromEmail === "function" ? deriveNameFromEmail(gmEmail) : "");
+
+    // Populate subcontractors based on branch (but only if present)
+    if (branch && typeof fetchSubcontractorSuggestions === "function") {
+      await fetchSubcontractorSuggestions(branch);
+      if (typeof updateSubcontractorAutocomplete === "function") {
+        updateSubcontractorAutocomplete();
+      }
+    } else {
+      console.warn("⚠️ No branch found in bid details, skipping subcontractor fetch.");
+    }
+
+    // ----- Vendor matching (robust) -----
+    const vendorRaw = getFieldStr(fields, "vendor");        // may be "" if not set
+    const vendorNormalized = normalizeString(vendorRaw);
+    const vendors = (window.vendorData || []).slice();      // may be []
+    let matchingVendors = [];
+
+    if (!vendors.length) {
+      console.warn("⚠️ vendorData is empty or not loaded yet.");
+    } else if (vendorNormalized) {
+      // First try strict name match
+      matchingVendors = vendors.filter(v => normalizeString(v?.name) === vendorNormalized);
+
+      // If none, try first-word fuzzy (name/email)
+      if (matchingVendors.length === 0) {
+        const firstWord = vendorNormalized.split(/\s+/)[0] || "";
+        if (firstWord) {
+          matchingVendors = vendors.filter(v => {
+            const n = normalizeString(v?.name);
+            const e = normalizeString(v?.email);
+            return n.includes(firstWord) || e.includes(firstWord);
+          });
+        }
+      }
+    }
+
+    // Ensure DOM targets exist before we write
+    if (typeof waitForElement === "function") {
+      await waitForElement(".gmNameContainer");
+    }
+
+    // Decide how to show vendor result(s)
+    if (matchingVendors.length === 1) {
+      const matched = matchingVendors[0];
+      window.currentVendorEmail = matched?.email || "";
+      if (typeof updateMultipleSpans === "function") {
+        updateMultipleSpans(".bidNameContainer", bidName);
+        updateMultipleSpans(".vendorNameContainer", matched?.name || "");
+        updateMultipleSpans(".vendorEmailWrapper", matched?.email ? ` <${matched.email}>` : "");
+      } else {
+        document.querySelectorAll(".bidNameContainer").forEach(el => el.textContent = bidName);
+        document.querySelectorAll(".vendorNameContainer").forEach(el => el.textContent = matched?.name || "");
+        document.querySelectorAll(".vendorEmailWrapper").forEach(el => el.textContent = matched?.email ? ` <${matched.email}>` : "");
+      }
+    } else if (matchingVendors.length > 1) {
+      // If branch appears in one, narrow; else present a picker
+      const branchText = normalizeString(
+        document.querySelector(".branchContainer")?.textContent || ""
+      );
+
+      let narrowed = matchingVendors;
+      if (branchText) {
+        narrowed = matchingVendors.filter(v =>
+          normalizeString(v?.name).includes(branchText) ||
+          normalizeString(v?.email).includes(branchText)
+        );
+      }
+
+      if (narrowed.length === 1) {
+        const matched = narrowed[0];
+        window.currentVendorEmail = matched?.email || "";
+        document.querySelectorAll(".vendorNameContainer").forEach(el => el.textContent = matched?.name || "");
+        document.querySelectorAll(".vendorEmailWrapper").forEach(el => el.textContent = matched?.email ? ` <${matched.email}>` : "");
+      } else if (typeof renderMatchingVendorsToDropdown === "function") {
+        renderMatchingVendorsToDropdown(matchingVendors);
+      } else {
+        console.warn("⚠️ Multiple vendor matches but no dropdown renderer available.");
+      }
+    } else {
+      // No matches → optionally show a chooser of all vendors, or leave blank
+      console.warn(`⚠️ No close vendor matches for "${vendorRaw}" — showing all vendors (if UI available).`);
+      if (typeof renderMatchingVendorsToDropdown === "function") {
+        renderMatchingVendorsToDropdown(vendors);
+      }
+    }
+
+    // Update GM/ACM/UI spans
+    if (typeof updateMultipleSpans === "function") {
+      updateMultipleSpans(".gmNameContainer", gm);
+      updateMultipleSpans(".gmEmailContainer", gmEmail);
+      updateMultipleSpans(".acmEmailContainer", acmEmail);
+    } else {
+      document.querySelectorAll(".gmNameContainer").forEach(el => el.textContent = gm);
+      document.querySelectorAll(".gmEmailContainer").forEach(el => el.textContent = gmEmail || "");
+      document.querySelectorAll(".acmEmailContainer").forEach(el => el.textContent = acmEmail || "");
+    }
+
+    // Your existing template population (uses your existing function/signature)
+    if (typeof updateTemplateText === "function") {
+      updateTemplateText(
+        getFieldStr(fields, "Bid Name") || bidName, // subdivision in your template’s wording
+        builder,
+        gmEmail,
+        branch,
+        projectType,
+        materialType,
+        numberOfLots,
+        anticipatedStartDate,
+        vendorRaw,
+        anticipatedDuration,
+        gm
+      );
+    }
+
+    // Done — return structured data for any downstream usage
+    return {
+      builder,
+      gmEmail,
+      branch,
+      projectType,
+      materialType,
+      numberOfLots,
+      anticipatedStartDate,
+      vendorRaw,
+      AnticipatedDuration: anticipatedDuration,
+      gm
+    };
+  } catch (err) {
+    console.error("❌ Error in fetchDetailsByBidName:", err);
+    return {};
+  }
 }
+
 
 function showVendorSelectionDropdown(vendorMatches) {
     const container = document.getElementById("vendorEmailContainer");
