@@ -51,7 +51,6 @@ function getSharedFieldValues() {
     };
 }
 
-
 // ✅ Fetch ACM Full Name and Email by matching Title and Vanir Office
 async function fetchACMName(branch) {
     try {
@@ -221,7 +220,6 @@ function updateVendorAutocompleteOptions(vendors = []) {
     dropdown.style.display = vendors.length > 0 ? 'block' : 'none';
 }
 
-
 function autoProgressLoading(stopConditionCallback) {
     let currentProgress = 0;
     const interval = setInterval(() => {
@@ -265,6 +263,7 @@ document.addEventListener('DOMContentLoaded', () => {
     monitorSubdivisionChanges();
     setupCopySubEmailsButton(); 
 });
+
 function updateAutocompleteOptions(type, newSuggestions = []) {
     const input = document.querySelector(`.${type}-autocomplete-input`);
     const dropdown = document.querySelector(`.${type}-autocomplete-dropdown`);
@@ -419,7 +418,6 @@ document.getElementById("clearCacheBtn")?.addEventListener("click", () => {
     alert("📭 Session cache cleared. Refresh to fetch fresh data.");
 });
 
-
 function updateMultipleSpans(selector, value) {
     document.querySelectorAll(selector).forEach(el => {
         el.textContent = value || '';
@@ -555,9 +553,7 @@ async function fetchBidNameSuggestions() {
 
  sessionStorage.setItem(cacheKey, JSON.stringify(bidNameSuggestions));
 sessionStorage.setItem(cacheTimestampKey, Date.now().toString());
-
 }
-
 
 async function fetchSubcontractorSuggestions(branch) {
     if (!branch) {
@@ -614,7 +610,6 @@ function updateMultipleSpans(selector, value) {
 
 async function fetchDetailsByBidName(bidName) {
     clearAllDynamicSpans();
-
 
 const filterFormula = `AND({Bid Name} = "${bidName.trim()}", {Outcome}='Win')`;
 const records = await fetchAirtableData(bidBaseName, bidTableName, '', filterFormula);
@@ -682,8 +677,7 @@ console.log("✅ Using branch:", fields['Branch']);
        if (matchingVendors.length === 1) {
     const matched = matchingVendors[0];
     window.currentVendorEmail = matched.email;
-updateMultipleSpans('.bidNameContainer', bidName);
-
+    updateMultipleSpans('.bidNameContainer', bidName);
     updateMultipleSpans('.vendorNameContainer', matched.name);
     updateMultipleSpans('.vendorEmailWrapper', ` <${matched.email}>`);
 
@@ -798,10 +792,8 @@ option.innerHTML = `<strong>${vendor.name}</strong><br><small>${vendor.email}</s
 
 option.addEventListener("click", () => {
     window.currentVendorEmail = vendor.email;
-
     document.querySelectorAll('.vendorNameContainer').forEach(el => el.textContent = vendor.name);
     document.querySelectorAll('.vendorEmailWrapper').forEach(el => el.textContent = ` <${vendor.email}>`);
-
     wrapper.remove(); // Close dropdown
 });
             list.appendChild(option);
@@ -991,7 +983,6 @@ loadingSpinner.style.display = disabled ? "block" : "none";
     }
 });
 
-
     function highlightOption(index) {
     currentOptions.forEach((option, i) => {
         if (i === index) {
@@ -1002,8 +993,6 @@ loadingSpinner.style.display = disabled ? "block" : "none";
         }
     });
 }
-
-
     wrapper.appendChild(input);
     wrapper.appendChild(loadingSpinner);
     wrapper.appendChild(dropdown);
@@ -1203,11 +1192,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     monitorSubdivisionChanges();
 
     // 1.5️⃣ Render bid input immediately as disabled/loading
-    renderBidInputImmediately(); // <--- this renders the input DISABLED with spinner
+    renderBidInputImmediately(); 
 
     // 2️⃣ Always fetch vendor and bid data first — BEFORE initializing autocomplete logic
     await fetchAllVendorData();
-    await fetchBidNameSuggestions(); // 🚩 Ensure bidNameSuggestions[] is ready!
+    await fetchBidNameSuggestions();
 
     // 2.5️⃣ Enable the input and hide spinner
     if (window.bidAutocompleteInputWrapper && window.bidAutocompleteInputWrapper.enableInput) {
