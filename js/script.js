@@ -1512,8 +1512,8 @@ function normalizePurchasingEmail(email) {
 maggie@vanirinstalledsales.com, 
 jason.smith@vanirinstalledsales.com, 
 hunter@vanirinstalledsales.com, 
+lance.roberts@vanirinstalledsales.com,
 rick.jinkins@vanirinstalledsales.com, 
-josh@vanirinstalledsales.com, 
 ethen.wilson@vanirinstalledsales.com, 
 dallas.hudson@vanirinstalledsales.com, 
 mike.raszmann@vanirinstalledsales.com
@@ -1631,7 +1631,7 @@ mike.raszmann@vanirinstalledsales.com
     "jason.smith@vanirinstalledsales.com",
     "hunter@vanirinstalledsales.com",
     "rick.jinkins@vanirinstalledsales.com",
-    "josh@vanirinstalledsales.com",
+    "lance.roberts@vanirinstalledsales.com",
     "ethen.wilson@vanirinstalledsales.com",
     "dallas.hudson@vanirinstalledsales.com",
     "mike.raszmann@vanirinstalledsales.com"
@@ -1975,7 +1975,7 @@ const estimatesEmail = `estimates.${selectedBranch}@vanirinstalledsales.com`;
       "jason.smith@vanirinstalledsales.com",
       "hunter@vanirinstalledsales.com",
       "rick.jinkins@vanirinstalledsales.com",
-      "josh@vanirinstalledsales.com",
+"   lance.roberts@vanirinstalledsales.com",
       "dallas.hudson@vanirinstalledsales.com",
       "mike.raszmann@vanirinstalledsales.com",
       "ethen.wilson@vanirinstalledsales.com",
