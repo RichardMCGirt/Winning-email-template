@@ -1,3 +1,48 @@
+'use strict';
+/*!
+ * Cleaned build shim (non-destructive)
+ * - Enforces strict mode
+ * - Guards against double-inclusion
+ * - Wraps DOMContentLoaded listeners so each runs at most once
+ * - Adds fetchJSON() helper with diagnostics
+ */
+(function __CLEANED_SHIM__(){
+  if (window.__VANIR_CLEANED_BUILD__) return;
+  window.__VANIR_CLEANED_BUILD__ = true;
+
+  // Wrap DOMContentLoaded listeners: run once per handler, catch errors
+  (function(){
+    const origAdd = document.addEventListener.bind(document);
+    document.addEventListener = function(type, listener, options){
+      if (type === 'DOMContentLoaded' && typeof listener === 'function'){
+        let ran = false;
+        const wrapped = function(ev){
+          if (ran) return;
+          ran = true;
+          try { return listener.call(this, ev); }
+          catch (err){ console.error('[DOMContentLoaded handler error]', err); }
+        };
+        return origAdd(type, wrapped, options);
+      }
+      return origAdd(type, listener, options);
+    };
+  })();
+
+  // JSON fetch with diagnostics (kept global for optional reuse)
+  window.fetchJSON = async function(url, opts={}){
+    const res = await fetch(url, opts);
+    if (!res.ok){
+      let body = '';
+      try { body = await res.text(); } catch(_){}
+      console.error('[fetchJSON]', res.status, res.statusText, url, body?.slice?.(0,500) || '');
+      const e = new Error(`HTTP ${res.status} ${res.statusText}`);
+      e.status = res.status; e.url = url; e.body = body;
+      throw e;
+    }
+    return res.json();
+  };
+})();
+
 
 // Required constants and helper functions
 const airtableApiKey = 'patCnUsdz4bORwYNV.5c27cab8c99e7caf5b0dc05ce177182df1a9d60f4afc4a5d4b57802f44c65328';
@@ -8,6 +53,10 @@ const baseId = "appK9gZS77OmsIK50";
 const tableId = "tblQo2148s04gVPq1";
 const PAGE_SIZE = 100; // max allowed
 let offset = null;
+
+// Ensure vendorData is declared before assignment/usage
+let vendorData = [];
+
 
 const subcontractorBaseName = 'applsSm4HgPspYfrg';
 const subcontractorTableName = 'tblX03hd5HX02rWQu';
