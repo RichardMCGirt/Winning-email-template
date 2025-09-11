@@ -1,48 +1,181 @@
 'use strict';
-/*!
- * Cleaned build shim (non-destructive)
- * - Enforces strict mode
- * - Guards against double-inclusion
- * - Wraps DOMContentLoaded listeners so each runs at most once
- * - Adds fetchJSON() helper with diagnostics
- */
-(function __CLEANED_SHIM__(){
-  if (window.__VANIR_CLEANED_BUILD__) return;
-  window.__VANIR_CLEANED_BUILD__ = true;
 
-  // Wrap DOMContentLoaded listeners: run once per handler, catch errors
-  (function(){
-    const origAdd = document.addEventListener.bind(document);
-    document.addEventListener = function(type, listener, options){
-      if (type === 'DOMContentLoaded' && typeof listener === 'function'){
-        let ran = false;
-        const wrapped = function(ev){
-          if (ran) return;
-          ran = true;
-          try { return listener.call(this, ev); }
-          catch (err){ console.error('[DOMContentLoaded handler error]', err); }
-        };
-        return origAdd(type, wrapped, options);
+(function __VANIR_FULL_REFACTOR__(){
+  if (window.__VANIR_FULL_REFACTOR__) return;
+  window.__VANIR_FULL_REFACTOR__ = true;
+
+  // -----------------------------
+  // Config
+  // -----------------------------
+  const CONFIG = {
+    airtableRps: 4,
+    airtableHost: 'api.airtable.com',
+    verbose: false,
+  };
+  const dbg = (...a)=> CONFIG.verbose && console.log('[FULL]', ...a);
+
+  // -----------------------------
+  // Aggregated init (single startup)
+  // -----------------------------
+  const readyQueue = [];
+  const loadQueue  = [];
+  const origDocAdd = Document.prototype.addEventListener;
+  const origWinAdd = Window.prototype.addEventListener;
+
+  function pushOnce(q, fn){ if (typeof fn==='function' && !q.includes(fn)) q.push(fn); }
+
+  Document.prototype.addEventListener = function(type, listener, options){
+    if (type === 'DOMContentLoaded' && typeof listener === 'function'){
+      pushOnce(readyQueue, listener);
+      if (!document.__full_ready_bound){
+        document.__full_ready_bound = true;
+        origDocAdd.call(document, 'DOMContentLoaded', ev => {
+          dbg('running DOMContentLoaded handlers:', readyQueue.length);
+          for (const fn of readyQueue) { try{ fn.call(document, ev); }catch(e){ console.error('[DOMContentLoaded]', e);} }
+        }, options);
       }
-      return origAdd(type, listener, options);
+      return;
+    }
+    return origDocAdd.call(this, type, listener, options);
+  };
+
+  Window.prototype.addEventListener = function(type, listener, options){
+    if (type === 'load' && typeof listener === 'function'){
+      pushOnce(loadQueue, listener);
+      if (!window.__full_load_bound){
+        window.__full_load_bound = true;
+        origWinAdd.call(window, 'load', ev => {
+          dbg('running window.load handlers:', loadQueue.length);
+          for (const fn of loadQueue) { try{ fn.call(window, ev); }catch(e){ console.error('[window.load]', e);} }
+        }, options);
+      }
+      return;
+    }
+    return origWinAdd.call(this, type, listener, options);
+  };
+
+  // -----------------------------
+  // Global duplicate event-listener guard
+  // -----------------------------
+  (function dedupListeners(){
+    const origAdd = EventTarget.prototype.addEventListener;
+    const seen = new WeakMap();
+    EventTarget.prototype.addEventListener = function(type, listener, options){
+      try {
+        const capture = (typeof options === 'boolean') ? options : !!(options && options.capture);
+        const key = String(type)+'|'+String(capture)+'|'+String(listener && listener.toString && listener.toString());
+        let map = seen.get(this);
+        if (!map) { map = new Map(); seen.set(this, map); }
+        if (map.has(key)) return; // skip duplicate
+        map.set(key, true);
+      } catch(_) {}
+      return origAdd.call(this, type, listener, options);
     };
   })();
 
-  // JSON fetch with diagnostics (kept global for optional reuse)
-  window.fetchJSON = async function(url, opts={}){
-    const res = await fetch(url, opts);
-    if (!res.ok){
-      let body = '';
-      try { body = await res.text(); } catch(_){}
-      console.error('[fetchJSON]', res.status, res.statusText, url, body?.slice?.(0,500) || '');
-      const e = new Error(`HTTP ${res.status} ${res.statusText}`);
-      e.status = res.status; e.url = url; e.body = body;
-      throw e;
-    }
-    return res.json();
-  };
-})();
+  // -----------------------------
+  // fetchJSON with retry/backoff
+  // -----------------------------
+  async function fetchJSON(url, opts={}){
+    const attempt = async (n) => {
+      const res = await fetch(url, opts);
+      if (!res.ok){
+        const txt = await res.text().catch(()=>'');
+        console.error('[fetchJSON]', res.status, res.statusText, url, txt.slice(0,500));
+        if ((res.status === 429 || res.status >= 500) && n < 3){
+          const ms = Math.min(2000*(n+1), 5000);
+          await new Promise(r=>setTimeout(r, ms));
+          return attempt(n+1);
+        }
+        const e = new Error(`HTTP ${res.status} ${res.statusText}`);
+        e.status = res.status; e.url = url; e.body = txt;
+        throw e;
+      }
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      return ct.includes('application/json') ? res.json() : res.text();
+    };
+    return attempt(0);
+  }
+  window.fetchJSON = window.fetchJSON || fetchJSON;
 
+  // -----------------------------
+  // Airtable rate-limiter (wrap fetch)
+  // -----------------------------
+  (function throttleAirtable(){
+    const orig = window.fetch.bind(window);
+    const q = [];
+    let ticking=false;
+    const minMs = Math.max(250, Math.floor(1000/Math.max(1, CONFIG.airtableRps)));
+
+    function pump(){
+      if (!q.length) { ticking=false; return; }
+      ticking=true;
+      const job = q.shift();
+      job().finally(()=> setTimeout(pump, minMs));
+    }
+
+    window.fetch = function(url, opts){
+      try{
+        const u = new URL(typeof url==='string' ? url : url.url, location.href);
+        if (u.host === CONFIG.airtableHost){
+          return new Promise((res, rej)=> {
+            q.push(()=> orig(url, opts).then(res, rej));
+            if (!ticking) pump();
+          });
+        }
+      }catch(_){}
+      return orig(url, opts);
+    };
+  })();
+
+  // -----------------------------
+  // VanirApp namespace (helpers & cache)
+  // -----------------------------
+  const VanirApp = window.VanirApp || (window.VanirApp = {});
+  VanirApp.Utils = {
+    debounce(fn, delay=250){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn.apply(this,a), delay); }; },
+    escapeForAirtableFilter(s=''){ return String(s).replace(/\"/g,'\\\"'); },
+    normalizeString(s){ return typeof s==='string' ? s.trim().toLowerCase() : ''; },
+    getFieldStr(fields, key){ if(!fields||typeof fields!=='object')return''; const v=fields[key]; if(Array.isArray(v)) return v[0]??''; if(v==null) return''; return String(v); },
+    getArrayOrEmpty(fields, key){ const v=fields?.[key]; if(Array.isArray(v)) return v; if(typeof v==='string'&&v) return [v]; return []; },
+    setTextAll(sel, val){ document.querySelectorAll(sel).forEach(el=> el.textContent = val ?? ''); },
+    deriveNameFromEmail(email){ if(!email||typeof email!=='string') return 'Unknown Name'; const [user]=email.split('@'); const [f,l]=(user||'').split('.'); if(!f||!l) return 'Unknown Name'; const cap=s=>s.charAt(0).toUpperCase()+s.slice(1); return `${cap(f)} ${cap(l)}`; },
+    encodeQS(obj){ const q=new URLSearchParams(); Object.entries(obj||{}).forEach(([k,v])=>{ if(v) q.set(k,v);}); return q.toString(); },
+    gmailLink({to,cc,bcc,subject,body}){ return `https://mail.google.com/mail/?view=cm&fs=1&${VanirApp.Utils.encodeQS({to,cc,bcc,su:subject,body})}`; },
+    waitForElement(selector, timeout=5000){ return new Promise((resolve,reject)=>{ const start=Date.now(); (function check(){ const el=document.querySelector(selector); if(el) return resolve(el); if(Date.now()-start>timeout) return reject(new Error(`Timeout waiting for ${selector}`)); requestAnimationFrame(check); })(); }); },
+  };
+
+  VanirApp.Cache = {
+    get(key, ttlMs){ try{ const raw=sessionStorage.getItem(key); const ts=Number(sessionStorage.getItem(key+':ts')); if(!raw||!ts) return null; if(Date.now()-ts>ttlMs) return null; return JSON.parse(raw);}catch{return null;} },
+    set(key, val){ try{ sessionStorage.setItem(key, JSON.stringify(val)); sessionStorage.setItem(key+':ts', String(Date.now())); }catch{} },
+    clear(keys){ (keys||[]).forEach(k=>{ sessionStorage.removeItem(k); sessionStorage.removeItem(k+':ts'); }); }
+  };
+
+  VanirApp.Airtable = {
+    async fetchRecords(baseId, tableId, filterFormula='', pageSize=100){
+      let all=[]; let offset=null;
+      do{
+        let url = `https://api.airtable.com/v0/${baseId}/${tableId}?pageSize=${pageSize}`;
+        if (filterFormula) url += `&filterByFormula=${encodeURIComponent(filterFormula)}`;
+        if (offset) url += `&offset=${offset}`;
+        const res = await fetchJSON(url, { headers: { Authorization: `Bearer ${window.airtableApiKey || window.AIRTABLE_API_KEY || ''}`}});
+        all = all.concat(res.records || []);
+        offset = res.offset;
+      } while (offset);
+      return all;
+    }
+  };
+
+  // Ensure global vendorData exists
+  if (!('vendorData' in window)) window.vendorData = [];
+
+  // Expose a single entry point if you ever want to call manually
+  VanirApp.runInit = function(){ document.dispatchEvent(new Event('DOMContentLoaded')); };
+})();
+/* =========================
+   BEGIN: ORIGINAL APP CODE
+   (kept verbatim; do not modify to preserve behavior)
+========================= */
 
 // Required constants and helper functions
 const airtableApiKey = 'patCnUsdz4bORwYNV.5c27cab8c99e7caf5b0dc05ce177182df1a9d60f4afc4a5d4b57802f44c65328';
@@ -2585,3 +2718,468 @@ async function waitForElement(selector, timeout = 5000) {
         check();
     });
 }
+/* =========================
+   END: ORIGINAL APP CODE
+========================= */
+
+// Post-load: unify duplicate functions safely (use our canonical helpers)
+(function(){
+  const U = window.VanirApp && window.VanirApp.Utils;
+  if (!U) return;
+  // Replace duplicates with canonical versions
+  try { window.updateMultipleSpans = function(selector, value){ U.setTextAll(selector, value); }; } catch(_){}
+  try { window.waitForElement = U.waitForElement; } catch(_){}
+  // highlightOption is coupled to currentOptions in your app; keep your latest definition to preserve behavior.
+})();
+/* =========================
+   PHASE 2 PATCHES (unify internals)
+========================= */
+(function(){
+  const VA = window.VanirApp || {};
+  const U  = VA.Utils || {};
+  const C  = VA.Cache || {};
+
+  if (!window.__VANIR_PHASE2__) window.__VANIR_PHASE2__ = true;
+
+  // 1) Replace common helpers globally to ensure one implementation
+  try { window.debounce = U.debounce.bind(null); } catch(_){}
+  try { window.waitForElement = U.waitForElement; } catch(_){}
+  try { window.updateMultipleSpans = function(selector, value){ U.setTextAll(selector, value); }; } catch(_){}
+
+  // 2) Standardize vendor/bid cache behavior to sessionStorage + TTL
+  (function standardizeCaches(){
+    const VKEY='cachedVendors', BKEY='cachedBidNames';
+    const TTL = 30*60*1000; // 30 min
+
+    function harmonize(key){
+      const tsKey = key+':ts';
+      // If legacy timestamp key exists under a different naming scheme, normalize it here (best-effort)
+      // We simply keep whatever exists; future sets use our session TTL keys.
+      const raw = sessionStorage.getItem(key);
+      const ts  = sessionStorage.getItem(tsKey);
+      if (raw && !ts) sessionStorage.setItem(tsKey, String(Date.now()));
+    }
+
+    harmonize(VKEY);
+    harmonize(BKEY);
+
+    // Expose simple getters for existing functions if they want them
+    window.__phase2GetCache = function(key, ttlMs=TTL){
+      try{
+        const raw = sessionStorage.getItem(key);
+        const ts  = Number(sessionStorage.getItem(key+':ts'));
+        if (!raw || !ts) return null;
+        if (Date.now()-ts > ttlMs) return null;
+        return JSON.parse(raw);
+      }catch{ return null; }
+    };
+    window.__phase2SetCache = function(key, val){
+      try{
+        sessionStorage.setItem(key, JSON.stringify(val));
+        sessionStorage.setItem(key+':ts', String(Date.now()));
+      }catch{}
+    };
+  })();
+
+  // 3) Provide a single, explicit init that mirrors your DOMContentLoaded work (idempotent)
+  //    This does NOT remove your existing handlers (the full refactor aggregates them already),
+  //    but gives you one place to kick off everything if you ever want to.
+  window.VanirApp = VA;
+  VA.init = VA.init || (async function init(){
+    if (VA.__inited) return; VA.__inited = true;
+
+    try {
+      // Template + base UI
+      if (typeof displayEmailContent === 'function') displayEmailContent();
+      if (typeof ensureDynamicContainerExists === 'function') ensureDynamicContainerExists();
+      if (typeof setupCopySubEmailsButton === 'function') setupCopySubEmailsButton();
+      if (typeof monitorSubdivisionChanges === 'function') monitorSubdivisionChanges();
+      if (typeof renderBidInputImmediately === 'function') renderBidInputImmediately();
+
+      // Load vendors and bids before wiring autocomplete
+      if (typeof fetchAllVendorData === 'function') await fetchAllVendorData();
+      if (typeof fetchBidNameSuggestions === 'function') await fetchBidNameSuggestions();
+
+      // Initialize bid autocomplete once
+      try {
+        if (!window.__autocompleteInitialized && typeof initializeBidAutocomplete === 'function') {
+          // Ensure container exists
+          if (typeof waitForOrCreateBidInputContainer === 'function') {
+            await waitForOrCreateBidInputContainer();
+          } else {
+            await U.waitForElement('#bidInputContainer').catch(()=>{});
+          }
+          initializeBidAutocomplete();
+          window.__autocompleteInitialized = true;
+        }
+      } catch(e){ console.warn('init: autocomplete', e); }
+
+      // Observers for city inputs
+      try {
+        if (typeof syncCityInputs === 'function') {
+          const bodyObserver = new MutationObserver(() => {
+            const inputs = document.querySelectorAll('input.city');
+            if (inputs.length >= 2) { syncCityInputs(); bodyObserver.disconnect(); }
+          });
+          bodyObserver.observe(document.body, { childList:true, subtree:true });
+        }
+      } catch(e){ console.warn('init: city observer', e); }
+
+      // Optional: textarea auto-resize hook if function exists
+      try {
+        const emailContainer = document.getElementById('emailTemplate');
+        if (emailContainer) {
+          const obs = new MutationObserver(muts=>{
+            muts.forEach(m=> m.addedNodes.forEach(n=>{
+              if (n.tagName === 'TEXTAREA' && (n.id==='additionalInfoInput'||n.id==='additionalInfoInputSub')){
+                n.addEventListener('input', function(){ this.style.height='auto'; this.style.height=`${this.scrollHeight}px`; });
+              }
+            }));
+          });
+          obs.observe(emailContainer, {childList:true, subtree:true});
+        }
+      } catch(e){ console.warn('init: textarea observer', e); }
+
+      // Wire change/clear vendor buttons if present
+      try {
+        const clearBtn = document.getElementById('clearVendorBtn');
+        if (clearBtn && !clearBtn.dataset.bound) {
+          clearBtn.dataset.bound = '1';
+          clearBtn.addEventListener('click', ()=>{
+            document.querySelectorAll('.vendorNameContainer').forEach(el=> el.textContent='');
+            document.querySelectorAll('.vendorEmailWrapper').forEach(el=> el.textContent='');
+            window.currentVendorEmail = '';
+          });
+        }
+      } catch(e){ console.warn('init: clear vendor', e); }
+
+      // Progress overlay, if defined
+      try {
+        if (typeof isBidInputVisible === 'function' && typeof autoProgressLoading === 'function') {
+          autoProgressLoading(isBidInputVisible);
+        }
+      } catch(e){ console.warn('init: progress', e); }
+
+    } catch (err) {
+      console.error('[Phase2 init error]', err);
+    }
+  });
+
+  // If DOM is already ready, run immediately
+  if (document.readyState === 'interactive' || document.readyState === 'complete') {
+    window.requestAnimationFrame(()=> VA.init().catch(console.error));
+  } else {
+    document.addEventListener('DOMContentLoaded', ()=> VA.init().catch(console.error), { once:true });
+  }
+})();
+
+
+
+
+(function AutoFlagOnSendSelectedEmailsIIFE(){
+  const BTN_ID = "sendSelectedEmails";
+
+  function uniqStrings(arr){
+    const s = new Set();
+    (arr || []).forEach(v => {
+      const k = String(v || "").trim();
+      if (k) s.add(k);
+    });
+    return [...s];
+  }
+
+  function getSelectedRecordIdsFallback(){
+    const out = new Set();
+    const nodes = document.querySelectorAll(
+      '[data-record-id].selected, ' +
+      'input[type="checkbox"][data-record-id]:checked, ' +
+      'input[type="checkbox"][name*="select"][data-record-id]:checked, ' +
+      'tr[aria-selected="true"][data-record-id], ' +
+      '.record-row.selected[data-record-id], ' +
+      '.is-selected[data-record-id], ' +
+      '[data-select="email"][data-record-id].selected'
+    );
+    nodes.forEach(el => {
+      const id = el.getAttribute('data-record-id') || (el.dataset ? el.dataset.recordId : '') || '';
+      if (id) out.add(String(id));
+    });
+    return [...out];
+  }
+
+  async function safeInvokeGetter(fn){
+    try{
+      const v = fn();
+      if (v && typeof v.then === "function") {
+        return await v;
+      }
+      return v;
+    } catch (e){
+      console.warn("[EmailFlag] getSelectedRecordIds() threw; using fallback. Details:", e);
+      return null;
+    }
+  }
+
+  async function onClickHandler(ev){
+    try{
+      let ids = [];
+      const hasGetter = (typeof window.getSelectedRecordIds === 'function');
+      if (hasGetter){
+        const res = await safeInvokeGetter(window.getSelectedRecordIds);
+        if (Array.isArray(res)) ids = res;
+      }
+      if (!Array.isArray(ids) || ids.length === 0){
+        ids = getSelectedRecordIdsFallback();
+      }
+      ids = uniqStrings(ids);
+
+      if (ids.length === 0){
+        console.warn('[EmailFlag] No selected record IDs found to flag.');
+        return;
+      }
+
+      for (const recordId of ids){
+        try{
+          await markWinningTemplateExported({ recordId, templateName: 'Winning' });
+        } catch (e) {
+          console.error('[EmailFlag] Failed to flag record', recordId, e);
+        }
+      }
+
+      if (typeof window.showToast === 'function'){
+        window.showToast(`Flagged ${ids.length} record${ids.length>1?'s':''} as "Winning" used for email.`);
+      } else {
+        console.log(`[EmailFlag] Flagged ${ids.length} selected record(s) as used for email (Winning).`);
+      }
+    } catch (err){
+      console.error('[EmailFlag] Error in click handler:', err);
+    }
+  }
+
+  function attach(){
+    const btn = document.getElementById(BTN_ID);
+    if (!btn) {
+      // Late-binding if the button is rendered later
+      const obs = new MutationObserver(() => {
+        const b = document.getElementById(BTN_ID);
+        if (b){
+          b.addEventListener('click', onClickHandler, { capture: false });
+          obs.disconnect();
+        }
+      });
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+      return;
+    }
+    btn.addEventListener('click', onClickHandler, { capture: false });
+  }
+
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
+  }
+})();
+
+(function EmailExportFlaggingIIFE() {
+  const AIRTABLE_API = "https://api.airtable.com/v0";
+
+  // Defensive global fallbacks: if your script defines these elsewhere, the helpers will pick them up.
+  function getDefault(k, fallback) {
+    try { return (typeof window !== "undefined" && window[k]) ? window[k] : (typeof globalThis !== "undefined" && globalThis[k]) ? globalThis[k] : fallback; }
+    catch (_) { return fallback; }
+  }
+
+  // Normalize strings for fuzzy field-name matching
+  function normFieldName(s) {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/[\s_\-()]/g, "")  // strip common separators
+      .replace(/[^a-z0-9]/g, ""); // letters/numbers only
+  }
+
+  // Try to pick the first candidate that exists on the record
+  function pickExistingFieldName(existingNames, candidates) {
+    const normalized = existingNames.map(n => ({ raw: n, norm: normFieldName(n) }));
+    for (const cand of candidates) {
+      const nc = normFieldName(cand);
+      const hit = normalized.find(e => e.norm === nc);
+      if (hit) return hit.raw; // return original-cased exact field name
+    }
+    // If no exact normalized match, try "contains" style match as a fallback, but prefer exact in practice
+    for (const cand of candidates) {
+      const nc = normFieldName(cand);
+      const hit = normalized.find(e => e.norm.includes(nc) || nc.includes(e.norm));
+      if (hit) return hit.raw;
+    }
+    return null;
+  }
+
+  async function airtableGetRecord({ baseId, tableId, recordId, apiKey }) {
+    const url = `${AIRTABLE_API}/${encodeURIComponent(baseId)}/${encodeURIComponent(tableId)}/${encodeURIComponent(recordId)}`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`GET record failed (${res.status}): ${text || res.statusText}`);
+    }
+    return res.json();
+  }
+
+  async function airtablePatchRecord({ baseId, tableId, recordId, apiKey, fields }) {
+    const url = `${AIRTABLE_API}/${encodeURIComponent(baseId)}/${encodeURIComponent(tableId)}/${encodeURIComponent(recordId)}`;
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ fields }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`PATCH failed (${res.status}): ${text || res.statusText}`);
+    }
+    return res.json();
+  }
+
+  function dedupeKey(recordId, templateName) {
+    return `emailFlag:${recordId}:${String(templateName || "Winning")}`;
+  }
+
+  function recentlyFlagged(recordId, templateName, windowMs = 5 * 60 * 1000) { // 5 minutes
+    try {
+      const key = dedupeKey(recordId, templateName);
+      const t  = Number(localStorage.getItem(key) || "0");
+      return (Date.now() - t) < windowMs;
+    } catch (_) { return false; }
+  }
+
+  function setFlaggedNow(recordId, templateName) {
+    try {
+      localStorage.setItem(dedupeKey(recordId, templateName), String(Date.now()));
+    } catch (_) {}
+  }
+
+  /**
+   * Mark "Winning template exported to Gmail" for a specific record.
+   * Tries to set any/all of these fields if they exist on the record:
+   *   - Checkbox-ish: ["Used for email (Winning Email Template)", "Used for email - Winning", "Used for Email", "Winning Email Template Used"]
+   *   - Text-ish:     ["Email Template Used", "Template Used", "Winning Template Used", "Email Template Name"]
+   *   - Datetime-ish: ["Email Exported At", "Email Template Exported At", "Template Exported At", "Winning Exported At"]
+   */
+  async function markWinningTemplateExported(opts) {
+    const {
+      recordId,
+      templateName = "Winning",
+      gmailUrl = "",
+      // Fallbacks to globals if not provided:
+      baseId = getDefault("BASE_ID"),
+      tableId = getDefault("TABLE_ID"),
+      apiKey = getDefault("AIRTABLE_API_KEY"),
+      // optional: override dedupe window
+      dedupeWindowMs = 5 * 60 * 1000,
+      // optional: log function
+      logger = console,
+    } = (opts || {});
+
+    if (!recordId) throw new Error("markWinningTemplateExported: 'recordId' is required.");
+    if (!baseId || !tableId || !apiKey) {
+      throw new Error("markWinningTemplateExported: baseId, tableId, and apiKey are required (or define globals BASE_ID, TABLE_ID, AIRTABLE_API_KEY).");
+    }
+
+    try {
+      if (recentlyFlagged(recordId, templateName, dedupeWindowMs)) {
+        logger?.log?.(`[EmailFlag] Skipping; already flagged recently for record ${recordId} + template "${templateName}".`);
+        return { skipped: true };
+      }
+
+      // Fetch record to see which fields exist
+      const rec = await airtableGetRecord({ baseId, tableId, recordId, apiKey });
+      const existingNames = Object.keys(rec?.fields || {});
+
+      // Decide which fields to set
+      const checkboxField = pickExistingFieldName(existingNames, [
+        "Used for email (Winning Email Template)",
+        "Used for email - Winning",
+        "Used for Email",
+        "Winning Email Template Used",
+        "Used for email winning email template"
+      ]);
+
+      const textField = pickExistingFieldName(existingNames, [
+        "Email Template Used",
+        "Email Template Name",
+        "Template Used",
+        "Winning Template Used",
+      ]);
+
+      const dateField = pickExistingFieldName(existingNames, [
+        "Email Exported At",
+        "Email Template Exported At",
+        "Template Exported At",
+        "Winning Exported At",
+      ]);
+
+      const historyField = pickExistingFieldName(existingNames, [
+        "Email Export History",
+        "Template Export History",
+        "Email History",
+      ]);
+
+      const patch = {};
+      if (checkboxField) patch[checkboxField] = true;
+      if (textField)     patch[textField]     = String(templateName || "Winning");
+      if (dateField)     patch[dateField]     = new Date().toISOString();
+
+      // Append a short history line if a suitable long-text field exists
+      if (historyField) {
+        const stamp = new Date().toISOString();
+        const msg   = `[${stamp}] Exported "${templateName}" to Gmail${gmailUrl ? " -> " + gmailUrl : ""}`;
+        const prior = String(rec.fields[historyField] || "");
+        patch[historyField] = prior ? (prior + "\n" + msg) : msg;
+      }
+
+      if (Object.keys(patch).length === 0) {
+        logger?.warn?.("[EmailFlag] No matching fields found on record to mark. (Add one of the suggested field names.)");
+        return { patched: false, reason: "no_fields" };
+      }
+
+      // Patch it
+      const result = await airtablePatchRecord({ baseId, tableId, recordId, apiKey, fields: patch });
+      setFlaggedNow(recordId, templateName);
+      logger?.log?.(`[EmailFlag] Marked record ${recordId} as exported for "${templateName}".`, { usedFields: Object.keys(patch) });
+      return { patched: true, usedFields: Object.keys(patch), result };
+    } catch (err) {
+      console.error("[EmailFlag] Failed to mark export:", err);
+      return { patched: false, error: String(err && err.message || err) };
+    }
+  }
+
+  // Convenience wrapper to both open Gmail and flag the record
+  async function openGmailAndFlag(opts) {
+    const { gmailUrl, logger = console } = (opts || {});
+    if (!gmailUrl) throw new Error("openGmailAndFlag: 'gmailUrl' is required.");
+    try {
+      // Try opening Gmail first so user action isn't blocked by network
+      window.open(gmailUrl, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      logger?.warn?.("[EmailFlag] Could not open Gmail window. Proceeding to mark anyway.", e);
+    }
+    // Now mark it
+    return markWinningTemplateExported(opts);
+  }
+
+  // Expose to global
+  try {
+    if (typeof window !== "undefined") {
+      window.markWinningTemplateExported = markWinningTemplateExported;
+      window.openGmailAndFlag = openGmailAndFlag;
+    }
+    if (typeof globalThis !== "undefined") {
+      globalThis.markWinningTemplateExported = markWinningTemplateExported;
+      globalThis.openGmailAndFlag = openGmailAndFlag;
+    }
+  } catch (_) {}
+
+})(); // end IIFE
+

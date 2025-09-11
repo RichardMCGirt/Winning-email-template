@@ -75,9 +75,20 @@
   <script src="js/darkmode.js"></script>
   <script src="js/password.js"></script>
     <script src="js/blanksub.js"></script>
+<script src="js/flagbid.js"></script>
+
+<script>
+  // Base/table can already be present in your app; only set if missing:
+  window.baseId = 'appK9gZS77OmsIK50';      // your Bid Board base
+  window.tableId = "tblQo2148s04gVPq1";     // your Bids table
+  // If you call Airtable from the browser, expose a PAT (dev only) or use your existing global:
+   window.airtableApiKey =  'patCnUsdz4bORwYNV.5c27cab8c99e7caf5b0dc05ce177182df1a9d60f4afc4a5d4b57802f44c65328'; // avoid in production — prefer server proxy
+
+  // Force the exact checkbox field (from your screenshot):
+  window.EMAIL_FLAG_CHECKBOX_FIELD = "Used for email winning email template";
+</script>
 
 
-  
 </body>
 
 </html>
