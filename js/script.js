@@ -1154,6 +1154,99 @@ function matchVendorsSmart(bidVendorName, vendors, branchText){
   return __uniq(tokenMatches);
 }
 
+function getSelectedVendorEmail() {
+  // Primary source: state set when user chooses a vendor
+  const stateEmail = (window.currentVendorEmail || '').trim();
+
+  if (stateEmail) return stateEmail;
+
+  // Fallback: parse from the visible wrapper if present (e.g., " <name@domain>")
+  const wrapper = document.querySelector('.vendorEmailWrapper');
+  if (wrapper && wrapper.textContent) {
+    const parsed = wrapper.textContent.replace(/[<>\s]/g, '').trim();
+    if (parsed && parsed.includes('@')) return parsed;
+  }
+
+  return '';
+}
+function buildVendorSubject() {
+  const bid = (document.querySelector('.bidNameContainer')?.textContent || '').trim();
+  const branch = (document.querySelector('.branchContainer')?.textContent || '').trim();
+  return bid ? `Vendor Pricing – ${bid} (${branch || 'Vanir'})` : 'Vendor Pricing Inquiry';
+}
+
+function buildVendorBody() {
+  // If you already render a template body in the page, feel free to read it instead.
+  const {
+    branch,
+    subdivision,
+    builder,
+    projectType,
+    materialType,
+    anticipatedStartDate,
+    numberOfLots,
+    city,
+    gm,
+    gmEmail
+  } = typeof getSharedFieldValues === 'function' ? getSharedFieldValues() : {};
+
+  const lines = [
+    'Greetings from Vanir Installed Sales,',
+    '',
+    subdivision && builder
+      ? `Vanir ${branch || ''} secured the ${subdivision} with ${builder}.`
+      : `We’re reaching out regarding upcoming work.`,
+    projectType && materialType
+      ? `This is a ${projectType} project requiring ${materialType} installation.`
+      : '',
+    '',
+    'Project Details:',
+    anticipatedStartDate ? `- Anticipated Start Date: ${anticipatedStartDate}` : '',
+    numberOfLots ? `- Number of Lots: ${numberOfLots}` : '',
+    city ? `- Project Location: ${city}` : '',
+    '',
+    (gm && gmEmail) ? `Please coordinate with our GM, ${gm} at ${gmEmail}.` : '',
+    '',
+    'Best regards,',
+    (document.querySelector('.userNameContainer')?.textContent || '').trim(),
+    `Vanir Installed Sales ${branch || ''}`,
+    'https://www.vanirinstalledsales.com'
+  ];
+
+  return lines.filter(Boolean).join('\n');
+}
+
+// Open Gmail compose with the vendor in the "to" field.
+// If you need CC/BCC, set them below (e.g., GM/ACM, purchasing, etc.)
+function openVendorEmailInGmail({ cc = '', bcc = '' } = {}) {
+  const to = getSelectedVendorEmail();
+  if (!to) {
+    alert('Please select a vendor (no vendor email is set).');
+    return;
+  }
+
+  const subject = buildVendorSubject();
+  const body = buildVendorBody();
+
+  // Use your existing gmailLink utility if present, otherwise build manually
+  const url = (window.VanirApp && VanirApp.Utils && typeof VanirApp.Utils.gmailLink === 'function')
+    ? VanirApp.Utils.gmailLink({ to, cc, bcc, subject, body }) // preferred
+    : `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}${cc ? `&cc=${encodeURIComponent(cc)}` : ''}${bcc ? `&bcc=${encodeURIComponent(bcc)}` : ''}`;
+
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+// Optional: wire a button with id="vendorEmailBtn"
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('vendorEmailBtn');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      // Example: CC the GM automatically (optional)
+      const gmCc = (document.querySelector('.gmEmailContainer')?.textContent || '').trim();
+      openVendorEmailInGmail({ cc: gmCc });
+    });
+  }
+});
 // ---------- SAFE replacement for fetchDetailsByBidName ----------
 async function fetchDetailsByBidName(bidNameInput) {
   try {
@@ -2641,114 +2734,54 @@ const textarea = document.getElementById('additionalInfoInput');
 const additionalDetails = textarea ? textarea.value.trim() : null;
 
 // Define generateMailtoLinks
+// Define generateMailtoLinks
 async function generateMailtoLinks() {
-    try {
+  try {
+    // Pull shared values already collected in your UI/state
+    const {
+      branch,
+      subdivision,
+      builder,
+      projectType,
+      materialType,
+      anticipatedStartDate,
+      numberOfLots,
+      city,
+      cname,
+      epace,
+      acmName,
+      sprice,
+      poCustomer,
+      gmEmail,
+      gm,
+      vendorEmail,          // fallback vendor (from Airtable)
+      vendorEmailWrapper,   // DOM node where the vendor email is shown
+      acmEmailGlobal        // used in team emails
+    } = getSharedFieldValues();
 
-      const {
-    branch,
-    subdivision,
-    builder,
-    projectType,
-    materialType,
-    anticipatedStartDate,
-    numberOfLots,
-    city,
-    cname,
-    epace,
-    acmName,
-    sprice,
-    poCustomer,
-    gmEmail,
-    gm,
-    vendorEmail,
-    vendorEmailWrapper
-} = getSharedFieldValues();
-
-if (vendorEmailWrapper) {
-    if (vendorEmail !== 'Not Specified' && vendorEmail.includes('@')) {
+    // Keep the visible wrapper in sync with the chosen vendor email
+    if (vendorEmailWrapper) {
+      if (vendorEmail !== 'Not Specified' && typeof vendorEmail === 'string' && vendorEmail.includes('@')) {
         vendorEmailWrapper.textContent = ` <${vendorEmail}>`;
-    } else {
+      } else if (window.currentVendorEmail && window.currentVendorEmail.includes('@')) {
+        vendorEmailWrapper.textContent = ` <${window.currentVendorEmail}>`;
+      } else {
         vendorEmailWrapper.textContent = '';
+      }
     }
-}
 
-        // Fetch user signature inputs
-        const userNameInput = await waitForElement('#inputUserName');
-        const userPhoneInput = await waitForElement('#inputUserPhone');
-        const userName = userNameInput.value.trim() || 'Your Name';
-        const userPhone = userPhoneInput.value.trim() || 'Your Phone';
-        const managementSubject = `Another WIN for Vanir - ${branch} - ${subdivision} - ${builder}`;
-        const managementBody = `
-        Go !! ${branch},
-        
-        Major Win with ${builder}!
-        
-        Here's the breakdown:
+    // User signature inputs (already present in your UI)
+    const userNameInput = await waitForElement('#inputUserName');
+    const userPhoneInput = await waitForElement('#inputUserPhone');
+    const userName = (userNameInput?.value || '').trim() || 'Your Name';
+    const userPhone = (userPhoneInput?.value || '').trim() || 'Your Phone';
 
-        Community Name: 
-        - Field Contact: ${cname}
+    // Subjects and bodies
+    const managementSubject = `Another WIN for Vanir - ${branch} - ${subdivision} - ${builder}`;
+    const managementBody = `
+Go !!
 
-
-        - ${projectType}
-        - Expected Pace: ${epace} ${epace > 1 ? 'days' : 'day'}
-        - Expected Start Date: ${anticipatedStartDate}
-        - Number of Lots: ${numberOfLots}
-        - Special Pricing: ${sprice}
-        - PO Customer: ${poCustomer}
-        - Material Type: ${materialType}
-            
-        Kind regards,  
-        ${userName}  
-        Vanir Installed Sales ${branch || 'LLC'}
-        Phone: ${userPhone}  
-        https://www.vanirinstalledsales.com  
-        Better Look. Better Service. Best Choice.
-        `.trim();
-      let acmSentence = '';
-
-if (acmName && acmEmailGlobal) {
-  const acmNames = acmName.split(',').map(n => n.trim());
-  const acmEmails = acmEmailGlobal.split(',').map(e => e.trim());
-
-  const pairs = acmNames.map((name, i) => `${name} at ${acmEmails[i] || ''}`);
-
-  const formatted = pairs.length === 1
-    ? pairs[0]
-    : pairs.slice(0, -1).join(', ') + ', and ' + pairs[pairs.length - 1];
-
-  const plural = pairs.length > 1 ? 's' : '';
-  acmSentence = `, or our Area Construction Manager${plural}, ${formatted}`;
-}
-        const subcontractorSubject = `Vanir Project Opportunity: ${branch} - ${builder}`;
-        const subcontractorBody = `
-Greetings from Vanir Installed Sales,
-
-Vanir ${branch} secured the ${subdivision} with ${builder}. We’re eager to get started and ensure excellence throughout the build.
-This will be a ${projectType} project, requiring ${materialType} installation.
-
-Project Details:
-
-- Expected Pace: ${epace} ${epace > 1 ? 'days' : 'day'}
-- Number of Lots: ${numberOfLots}
-- Anticipated Start Date: ${anticipatedStartDate}
-- Project Location: ${city}
-
-If you're interested in partnering with us on this opportunity, please contact our General Manager, ${gm} at ${gmEmail}${acmSentence}.
-
-Best regards, ${userName}  
-Vanir Installed Sales ${branch || 'LLC'}  
-Phone: ${userPhone}  
-https://www.vanirinstalledsales.com  
-Better Look. Better Service. Best Choice.
-`.trim();
-        
-
-      // Define these before you use them
-const vendorSubject = `Project Awarded | ${subdivision} | ${builder}`;
-const vendorBody = `
-Hello,
-
-We're excited to share that Vanir ${branch} will be partnering with ${builder}.
+Vanir ${branch} secured ${subdivision} with ${builder}.
 
 Project Summary:
 - Project Type: ${projectType}
@@ -2766,118 +2799,156 @@ https://www.vanirinstalledsales.com
 Better Look. Better Service. Best Choice.
 `.trim();
 
-        // Combine emails for the "To" and "CC" sections
-const selectedBranch = document.querySelector('.branchContainer')?.textContent.trim().toLowerCase().replace(/\s+/g, '');
-const rawPurchasingEmail = `purchasing.${selectedBranch}@vanirinstalledsales.com`;
-const purchasingEmail = normalizePurchasingEmail(rawPurchasingEmail);
-const estimatesEmail = `estimates.${selectedBranch}@vanirinstalledsales.com`;
+    // Purchasing/Estimates emails derived from branch
+    const selectedBranch = (document.querySelector('.branchContainer')?.textContent || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '');
+    const rawPurchasingEmail = `purchasing.${selectedBranch}@vanirinstalledsales.com`;
+    const purchasingEmail = normalizePurchasingEmail(rawPurchasingEmail);
+    const estimatesEmail = `estimates.${selectedBranch}@vanirinstalledsales.com`;
 
-  const teamEmails = [
+    // Team emails for management thread
+    const teamEmails = [
       "maggie@vanirinstalledsales.com",
       "jason.smith@vanirinstalledsales.com",
       "hunter@vanirinstalledsales.com",
       "rick.jinkins@vanirinstalledsales.com",
-"   lance.roberts@vanirinstalledsales.com",
+      "   lance.roberts@vanirinstalledsales.com",
       "dallas.hudson@vanirinstalledsales.com",
       "mike.raszmann@vanirinstalledsales.com",
       "ethen.wilson@vanirinstalledsales.com",
-      acmEmailGlobal, 
+      acmEmailGlobal,
       purchasingEmail,
       estimatesEmail
     ].filter(Boolean).join(", ");
 
-// Combine vendor + purchasing
-const vendorToEmail = [vendorEmail, purchasingEmail]
-  .filter(email => typeof email === "string" && email.includes('@'))
-  .join(',');
+    // ✅ Vendor email merge: prefer selected vendor from UI; fallback to Airtable vendor
+    const selectedVendorEmail = (window.currentVendorEmail || '').trim();
+    const effectiveVendorEmail = selectedVendorEmail || vendorEmail;
 
-const vendorToEncoded = `to=${encodeURIComponent(vendorToEmail)}`;
+    // Combine vendor + purchasing into the To field (comma separated)
+    const vendorToEmail = [effectiveVendorEmail, purchasingEmail]
+      .filter(email => typeof email === "string" && email.includes('@'))
+      .join(',');
 
-const vendorGmailLink = vendorToEmail
-  ? `https://mail.google.com/mail/?view=cm&fs=1&${vendorToEncoded}&su=${encodeURIComponent(vendorSubject)}&body=${encodeURIComponent(vendorBody)}`
-  : gmEmail
-    ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(gmEmail)}&su=${encodeURIComponent(vendorSubject)}&body=${encodeURIComponent(vendorBody)}`
-  : null;
+    // Build Vendor subject/body (adjust copy as needed)
+    const vendorSubject = `Vendor Pricing – ${subdivision || ''} (${branch || ''})`;
+    const vendorBody = `
+Greetings from Vanir Installed Sales,
 
-        // Generate Gmail links for both Management and Subcontractor emails
-const managementGmailLink = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(teamEmails)}&su=${encodeURIComponent(managementSubject)}&body=${encodeURIComponent(managementBody)}`;
-       // 💥 Properly split into chunks
-const sendBlankSubEmail = document.getElementById("optionSendBlankSubEmail")?.checked;
-const sendSubEmail = document.getElementById("optionSubcontractor")?.checked;
+Vanir ${branch || ''} secured the ${subdivision || ''} with ${builder || ''}.
+This will be a ${projectType || ''} project, requiring ${materialType || ''} installation.
 
-const filteredEmails = subcontractorSuggestions
-    .map(sub => sub.email)
-    .filter(email => typeof email === "string" && email.includes('@'));
+Project Details:
+- Anticipated Start Date: ${anticipatedStartDate || ''}
+- Number of Lots: ${numberOfLots || ''}
+- Project Location: ${city || ''}
 
-let subcontractorEmailChunks = [];
+Please coordinate with our GM, ${gm || ''} at ${gmEmail || ''}.
 
-if (sendBlankSubEmail) {
-  subcontractorEmailChunks = [[]];
-} else if (filteredEmails.length > 0) {
-  subcontractorEmailChunks = splitIntoChunks(filteredEmails, 30);
-}
+Best regards,
+${userName}
+Vanir Installed Sales ${branch || ''}
+https://www.vanirinstalledsales.com
+`.trim();
 
-let emailBody = ''; // Declare outside
+    // Gmail link for Management
+    const managementGmailLink = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(teamEmails)}&su=${encodeURIComponent(managementSubject)}&body=${encodeURIComponent(managementBody)}`;
 
-if (sendBlankSubEmail) {
-  emailBody = buildSubcontractorBody([], {
-    branch,
-    builder,
-    subdivision,
-    projectType,
-    materialType,
-    epace,
-    numberOfLots,
-    anticipatedStartDate,
-    city,
-    gm,
-    gmEmail,
-    acmName,
-    acmEmailGlobal,
-    userName,
-    userPhone
-  });
+    // Gmail link for Vendor thread:
+    // If we have vendorToEmail, use it; otherwise fall back to GM (matches your file’s behavior)
+    const vendorToEncoded = `to=${encodeURIComponent(vendorToEmail)}`;
+    const vendorGmailLink = vendorToEmail
+      ? `https://mail.google.com/mail/?view=cm&fs=1&${vendorToEncoded}&su=${encodeURIComponent(vendorSubject)}&body=${encodeURIComponent(vendorBody)}`
+      : (gmEmail
+          ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(gmEmail)}&su=${encodeURIComponent(vendorSubject)}&body=${encodeURIComponent(vendorBody)}`
+          : null);
 
-  const mailtoLink = `https://mail.google.com/mail/?view=cm&fs=1&to=&su=${encodeURIComponent(`Vanir Project Opportunity: ${branch} - ${builder}`)}&body=${encodeURIComponent(emailBody)}`;
-  subcontractorGmailLinks.push(mailtoLink);
-  window.open(mailtoLink, '_blank');
+    // Subcontractor options/flow
+    const sendBlankSubEmail = document.getElementById("optionSendBlankSubEmail")?.checked;
+    const sendSubEmail = document.getElementById("optionSubcontractor")?.checked;
 
-} else if (sendSubEmail && filteredEmails.length > 0) {
-  const chunks = splitIntoChunks(filteredEmails, 30);
+    const filteredEmails = (Array.isArray(window.subcontractorSuggestions) ? window.subcontractorSuggestions : [])
+      .map(sub => sub.email)
+      .filter(email => typeof email === "string" && email.includes('@'));
 
-  for (const chunk of chunks) {
-    emailBody = buildSubcontractorBody(chunk, {
-      branch,
-      builder,
-      subdivision,
-      projectType,
-      materialType,
-      epace,
-      numberOfLots,
-      anticipatedStartDate,
-      city,
-      gm,
-      gmEmail,
-      acmName,
-      acmEmailGlobal,
-      userName,
-      userPhone
-    });
-
-    const bccPart = chunk.length > 0 ? `&bcc=${encodeURIComponent(chunk.join(','))}` : '';
-    const mailtoLink = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(gmEmail)}${bccPart}&su=${encodeURIComponent(`Vanir Project Opportunity: ${branch} - ${builder}`)}&body=${encodeURIComponent(emailBody)}`;
-    subcontractorGmailLinks.push(mailtoLink);
-  }
-}       
-        return {
-            managementGmailLink,
-            subcontractorGmailLinks, 
-            vendorGmailLink
-        };
-    } catch (error) {
-        console.error("Error generating mailto links:", error.message);
+    let subcontractorEmailChunks = [];
+    if (sendBlankSubEmail) {
+      subcontractorEmailChunks = [[]]; // one blank compose
+    } else if (filteredEmails.length > 0) {
+      subcontractorEmailChunks = splitIntoChunks(filteredEmails, 30); // Gmail bcc safety
     }
+
+    // Build subcontractor bodies and links
+    const subcontractorGmailLinks = [];
+    let emailBody = '';
+
+    if (sendBlankSubEmail) {
+      // one blank body with no recipients
+      emailBody = buildSubcontractorBody([], {
+        branch,
+        builder,
+        subdivision,
+        projectType,
+        materialType,
+        epace,
+        numberOfLots,
+        anticipatedStartDate,
+        city,
+        gm,
+        gmEmail,
+        acmName,
+        acmEmailGlobal,
+        userName,
+        userPhone
+      });
+
+      const mailtoLink = `https://mail.google.com/mail/?view=cm&fs=1&to=&su=${encodeURIComponent(`Vanir Project Opportunity: ${branch} - ${builder}`)}&body=${encodeURIComponent(emailBody)}`;
+      subcontractorGmailLinks.push(mailtoLink);
+      // keep the original behavior of opening this one immediately
+      window.open(mailtoLink, '_blank');
+    } else if (sendSubEmail && filteredEmails.length > 0) {
+      // chunks as BCC with GM in To
+      const chunks = splitIntoChunks(filteredEmails, 30);
+      for (const chunk of chunks) {
+        emailBody = buildSubcontractorBody(chunk, {
+          branch,
+          builder,
+          subdivision,
+          projectType,
+          materialType,
+          epace,
+          numberOfLots,
+          anticipatedStartDate,
+          city,
+          gm,
+          gmEmail,
+          acmName,
+          acmEmailGlobal,
+          userName,
+          userPhone
+        });
+
+        const bccPart = chunk.length > 0 ? `&bcc=${encodeURIComponent(chunk.join(','))}` : '';
+        const mailtoLink = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(gmEmail || '')}${bccPart}&su=${encodeURIComponent(`Vanir Project Opportunity: ${branch} - ${builder}`)}&body=${encodeURIComponent(emailBody)}`;
+        subcontractorGmailLinks.push(mailtoLink);
+      }
+    }
+
+    // Return all links for the callers that open windows
+    return {
+      managementGmailLink,
+      subcontractorGmailLinks,
+      vendorGmailLink
+    };
+
+  } catch (error) {
+    console.error("Error generating mailto links:", error?.message || error);
+    return null;
+  }
 }
+
  
 // Function to show the redirect animation
 function showRedirectAnimation() {
