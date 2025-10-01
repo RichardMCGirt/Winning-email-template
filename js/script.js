@@ -1,4 +1,41 @@
 'use strict';
+/* ==== VANIR bootstrap shims (safe to paste at top) ======================== */
+(() => {
+  // Make sure these utilities exist globally before anything else runs.
+  if (typeof window.normalizeBid !== "function") {
+    window.normalizeBid = function normalizeBid(s) {
+      return typeof s === "string" ? s.replace(/\s+/g, " ").trim() : "";
+    };
+  }
+
+  if (typeof window.updateDataStatus !== "function") {
+    window.updateDataStatus = function updateDataStatus(kind, text) {
+      const el = document.getElementById("dataStatus");
+      if (!el) return;
+      el.textContent = text || "";
+      // neutral / warn / error
+      el.style.color = (kind === "warn") ? "#b54708"
+                    : (kind === "error") ? "#b42318"
+                    : "#667085";
+    };
+  }
+
+  if (typeof window.setBtnBusy !== "function") {
+    window.setBtnBusy = function setBtnBusy(btn, busy) {
+      if (!btn) return;
+      btn.disabled = !!busy;
+      const orig = btn.getAttribute("data-orig-text") || btn.textContent || "Refresh Bids";
+      if (!btn.getAttribute("data-orig-text")) btn.setAttribute("data-orig-text", orig);
+      btn.textContent = busy ? "Refreshing…" : orig;
+    };
+  }
+
+  // Expose the feature flag globally (so any handler can read it).
+  // We want cache-only boot, so default false.
+  if (typeof window.AUTO_FETCH_ON_LOAD === "undefined") {
+    window.AUTO_FETCH_ON_LOAD = false;
+  }
+})();
 
 (function __VANIR_FULL_REFACTOR__(){
   if (window.__VANIR_FULL_REFACTOR__) return;
@@ -18,6 +55,8 @@
   // Aggregated init (single startup)
   // -----------------------------
   const readyQueue = [];
+  const AUTO_FETCH_ON_LOAD = false;
+
   const loadQueue  = [];
   const origDocAdd = Document.prototype.addEventListener;
   const origWinAdd = Window.prototype.addEventListener;
@@ -205,6 +244,9 @@ const session = {
   vendorData: [],
   currentVendorEmail: '',
 };
+const BID_CACHE_KEY = "cachedBidNames"; // localStorage key
+const BID_CACHE_TS  = "cachedBidNamesTimestamp";
+const BID_CACHE_TTL = 1000 * 60 * 30;   // 30 min
 
 let subcontractorGmailLinks = [];
 let vendoremail = '';
@@ -232,7 +274,16 @@ function getSharedFieldValues() {
         vendorEmailWrapper: document.querySelector('.vendorEmailWrapper')
     };
 }
+async function fetchBidRecordsFromAirtable() {
+  // Example: {Outcome}='Win' and a view; change to your real values if needed.
+  const filter = "{Outcome}='Win'";
+  // NOTE: Replace the following identifiers with your actual ones if they differ:
+  const base  = (typeof bidBaseName  !== "undefined" ? bidBaseName  : baseId);
+  const table = (typeof bidTableName !== "undefined" ? bidTableName : tableId);
 
+  // fetchAirtableData(baseId, tableId, viewNameOrEmpty, filterFormula)
+  return await fetchAirtableData(base, table, "", filter);
+}
 // ✅ Fetch ACM Full Name and Email by matching Title and Vanir Office
 async function fetchACMName(branch) {
     try {
@@ -279,6 +330,66 @@ async function fetchACMName(branch) {
     } catch (error) {
         console.error("❌ Error in fetchACMName:", error);
     }
+}
+function loadBidCache() {
+  try {
+    const raw = localStorage.getItem(BID_CACHE_KEY);
+    const ts  = parseInt(localStorage.getItem(BID_CACHE_TS) || "0", 10);
+    if (!raw) return { rows: [], savedAt: 0 };
+
+    const arr = JSON.parse(raw) || [];
+    // normalize + dedupe case-insensitive
+    const normalized = arr.map(normalizeBid).filter(Boolean);
+    const seen = new Set();
+    const unique = [];
+    for (const name of normalized) {
+      const key = name.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(name);
+      }
+    }
+    return { rows: unique, savedAt: ts || 0 };
+  } catch {
+    return { rows: [], savedAt: 0 };
+  }
+}
+
+function saveBidCache(rows) {
+  try {
+    const normalized = (rows || []).map(normalizeBid).filter(Boolean);
+    const seen = new Set();
+    const unique = [];
+    for (const name of normalized) {
+      const key = name.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(name);
+      }
+    }
+    localStorage.setItem(BID_CACHE_KEY, JSON.stringify(unique));
+    localStorage.setItem(BID_CACHE_TS, Date.now().toString());
+    return unique;
+  } catch {
+    return [];
+  }
+}
+
+// --- Public API: hydrate from cache ONLY (no network) -----------------------
+function hydrateBidSuggestionsFromCache() {
+  const { rows, savedAt } = loadBidCache();
+  bidNameSuggestions = rows.slice();
+  if (rows.length) {
+    const ts = new Date(savedAt || Date.now()).toLocaleTimeString();
+    const stale = (Date.now() - (savedAt || 0)) > BID_CACHE_TTL;
+    updateDataStatus(stale ? "warn" : "ok",
+      stale
+        ? `Showing cached bids • Last updated ${ts} • Click "Refresh Bids" to update`
+        : `Loaded ${rows.length} bids from cache • Updated ${ts}`
+    );
+  } else {
+    updateDataStatus("");
+  }
 }
 
 function updateLoadingProgress(percentage) {
@@ -447,40 +558,39 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function updateAutocompleteOptions(type, newSuggestions = []) {
-    const input = document.querySelector(`.${type}-autocomplete-input`);
-    const dropdown = document.querySelector(`.${type}-autocomplete-dropdown`);
+  const input = document.querySelector(`.${type}-autocomplete-input`);
+  const dropdown = document.querySelector(`.${type}-autocomplete-dropdown`);
 
-    if (!input || !dropdown) {
-        console.warn(`⚠️ Autocomplete elements for "${type}" not found.`);
-        return;
-    }
+  if (!input || !dropdown) {
+    console.warn(`⚠️ Autocomplete elements for "${type}" not found.`);
+    return;
+  }
 
-    // Clear previous suggestions
-    dropdown.innerHTML = '';
+  dropdown.innerHTML = '';
+  const currentOptions = [];
 
-    // Store filtered options so arrow navigation still works
-    const currentOptions = [];
+  newSuggestions.forEach(suggestion => {
+    const raw = typeof suggestion === 'string' ? suggestion : suggestion.companyName;
+    const text = normalizeBid(raw); // <-- normalize here
+    const option = document.createElement("div");
+    option.classList.add(`${type}-autocomplete-option`, "autocomplete-option");
+    option.textContent = text;
 
-    newSuggestions.forEach(suggestion => {
-        const text = typeof suggestion === 'string' ? suggestion : suggestion.companyName;
-        const option = document.createElement("div");
-        option.classList.add(`${type}-autocomplete-option`, "autocomplete-option");
-        option.textContent = text;
-
-        option.addEventListener("click", () => {
-            input.value = text;
-            dropdown.innerHTML = '';
-            if (typeof fetchDetailsByBidName === "function" && type === "bid") {
-                fetchDetailsByBidName(text);
-            }
-        });
-
-        dropdown.appendChild(option);
-        currentOptions.push(option);
+    option.addEventListener("click", () => {
+      input.value = text;
+      dropdown.innerHTML = '';
+      if (typeof fetchDetailsByBidName === "function" && type === "bid") {
+        fetchDetailsByBidName(text);
+      }
     });
 
-    dropdown.style.display = newSuggestions.length > 0 ? "block" : "none";
+    dropdown.appendChild(option);
+    currentOptions.push(option);
+  });
+
+  dropdown.style.display = newSuggestions.length > 0 ? "block" : "none";
 }
+
 
 function deriveNameFromEmail(email) {
     if (!email || typeof email !== "string") return "Unknown Name";
@@ -513,87 +623,136 @@ function addCitySpan() {
     container.appendChild(citySpan);
 }
 
-async function fetchAllVendorData() {
-    const cacheKey = 'cachedVendors';
-    const cacheTimestampKey = 'cachedVendorsTimestamp';
-    const cacheTTL = 1000 * 60 * 30; // 30 minutes
+// ============================================================================
+// REPLACE your current fetchAllVendorData with this fully-paginated version.
+// ============================================================================
+// ============================================================================
+// Vendors: fully paginated with AdaptiveLoader hooks (DROP-IN REPLACEMENT)
+// ============================================================================
+async function fetchAllVendorData(opts = {}) {
+  const force = !!opts.force;
 
-    console.log("🔍 Checking vendor data cache...");
+  const CACHE_KEY = "cachedVendors";
+  const CACHE_TS  = "cachedVendorsTimestamp";
+  const MAX_AGE_MS = 1000 * 60 * 60 * 24; // 24h
 
-    const cachedData = sessionStorage.getItem(cacheKey);
-    const cachedTime = sessionStorage.getItem(cacheTimestampKey);
+  try {
+    const ts = Number(sessionStorage.getItem(CACHE_TS) || 0);
+    const age = Date.now() - ts;
+    if (!force && ts && age < MAX_AGE_MS) {
+      const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) || "[]");
+      if (Array.isArray(cached) && cached.length) {
+        window.vendorData = cached;
+        // mark task as instantly done from cache (one page)
+        try {
+          VanirLoad.startTask('vendors');
+          VanirLoad.pageArrived('vendors', cached.length, false);
+          VanirLoad.done('vendors');
+        } catch {}
+        return cached;
+      }
+    }
+  } catch (e) {
+    console.warn("⚠️ Vendor cache read failed; will refetch.", e);
+  }
 
-    const isValidCache = cachedData && cachedTime && (Date.now() - parseInt(cachedTime)) < cacheTTL;
+  async function _fetchPage({ baseId, tableId, offset }) {
+    const url = new URL(`https://api.airtable.com/v0/${baseId}/${tableId}`);
+    url.searchParams.set("pageSize", "100");
+    if (offset) url.searchParams.set("offset", offset);
+    const res = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${window.AIRTABLE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!res.ok) {
+      const msg = await res.text();
+      throw new Error(`Airtable vendors list failed ${res.status}: ${msg}`);
+    }
+    return res.json();
+  }
 
-    if (isValidCache) {
-        console.log("✅ Using cached vendor data (still valid).");
-        vendorData = JSON.parse(cachedData);
-        console.log(`📦 Cached vendors loaded: ${vendorData.length} records`);
-        return;
-    } else {
-        console.log("⚠️ Cache is empty or expired. Fetching from Airtable...");
+  const baseId  = window.AT_VENDOR_BASE_ID  || window.AT_BASE_ID || window.BASE_ID;
+  const tableId = window.AT_VENDOR_TABLE_ID || "Vendors";
+  if (!baseId || !tableId || !window.AIRTABLE_API_KEY) {
+    console.error("❌ Missing Airtable vendor config (baseId/tableId/apiKey).");
+    try { VanirLoad.startTask('vendors'); VanirLoad.done('vendors'); } catch {}
+    return [];
+  }
+
+  let offset = undefined;
+  const all = [];
+  let page = 0;
+
+  try { VanirLoad.startTask('vendors'); } catch {}
+
+  do {
+    page++;
+    const data = await _fetchPage({ baseId, tableId, offset });
+    const records = Array.isArray(data?.records) ? data.records : [];
+
+    for (const r of records) {
+      const f = r.fields || {};
+      all.push({
+        id: r.id,
+        name: f["Vendor Name"] || f["Name"] || f["Company"] || "",
+        email: f["Email"] || f["E-mail"] || f["Primary Email"] || "",
+      });
     }
 
-    try {
-        let allRecords = [];
-        let offset = null;
-        let requestCount = 0;
+    // progress hook per page
+    try { VanirLoad.pageArrived('vendors', records.length, !!data?.offset); } catch {}
 
-        do {
-            let url = `https://api.airtable.com/v0/${VendorBaseName}/${VendorTableName}?pageSize=100`;
-            if (offset) url += `&offset=${offset}`;
+    offset = data?.offset;
+  } while (offset);
 
-            requestCount++;
-            console.log(`📡 Fetching batch #${requestCount} from Airtable...`);
-            console.log(`➡️ URL: ${url}`);
+  const dedup = [];
+  const seen = new Set();
+  for (const v of all) {
+    const key = v?.id || `${v?.name}::${v?.email}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    dedup.push(v);
+  }
 
-            const response = await fetch(url, {
-                headers: {
-                    Authorization: `Bearer ${airtableApiKey}`,
-                },
-            });
+  try {
+    sessionStorage.setItem("cachedVendors", JSON.stringify(dedup));
+    sessionStorage.setItem("cachedVendorsTimestamp", String(Date.now()));
+  } catch (e) {
+    console.warn("⚠️ Vendor cache write failed.", e);
+  }
 
-            if (!response.ok) {
-                console.error(`❌ HTTP Error: ${response.status} - ${response.statusText}`);
-                break;
-            }
+  window.vendorData = dedup;
+  try { VanirLoad.done('vendors'); } catch {}
+  return dedup;
+}
 
-            const data = await response.json();
-            console.log(`📥 Received ${data.records.length} records`);
 
-            allRecords = allRecords.concat(data.records);
-            offset = data.offset;
+// Simple debounce
+function debounce(fn, ms = 200) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn.apply(null, args), ms);
+  };
+}
 
-            if (offset) {
-                console.log("➡️ More records available, continuing with offset:", offset);
-            } else {
-                console.log("✅ All records fetched, no more offset.");
-            }
-
-        } while (offset);
-
-        vendorData = allRecords.map(record => ({
-            name: record.fields['Name'] || "Unknown Vendor",
-            email: record.fields['Email'] || null,
-        }));
-
-        console.log(`📊 Total vendors after mapping: ${vendorData.length}`);
-
-        vendorData.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-        console.log("🔤 Vendors sorted alphabetically by name.");
-
-        sessionStorage.setItem(cacheKey, JSON.stringify(vendorData));
-        sessionStorage.setItem(cacheTimestampKey, Date.now().toString());
-
-        console.log("💾 Vendor data cached in sessionStorage.");
-
-    } catch (error) {
-        console.error("❌ Error fetching vendor data:", error);
-    }
+// Exact-match guard (normalize both)
+function isExactSuggestionMatch(inputValue, suggestions) {
+  const nval = (window.normalizeBid?.(inputValue) || "").toLowerCase();
+  if (!nval) return false;
+  if (!Array.isArray(suggestions) || !suggestions.length) return false;
+  if (suggestions.length === 1) {
+    return (window.normalizeBid?.(suggestions[0]) || "").toLowerCase() === nval;
+  }
+  return false;
 }
 
 document.getElementById("clearCacheBtn")?.addEventListener("click", () => {
     sessionStorage.removeItem("cachedBidNames");
+    localStorage.removeItem("cachedBidNamesTimestamp");
+
     sessionStorage.removeItem("cachedBidNamesTimestamp");
     sessionStorage.removeItem("cachedVendors");
     sessionStorage.removeItem("cachedVendorsTimestamp");
@@ -717,24 +876,84 @@ function appendEmailsForSelectedBid(selectedBid) {
 }
 
 // Fetch "Bid Name" suggestions
+
+// ============================================================================
+// Bids: cache-aware + AdaptiveLoader page hooks (DROP-IN REPLACEMENT)
+// ============================================================================
 async function fetchBidNameSuggestions() {
-    const cacheKey = 'cachedBidNames';
-    const cacheTimestampKey = 'cachedBidNamesTimestamp';
-    const cacheTTL = 1000 * 60 * 30; // 30 minutes
-    const cachedData = localStorage.getItem(cacheKey);
-    const cachedTime = localStorage.getItem(cacheTimestampKey);
-    const isValidCache = cachedData && cachedTime && (Date.now() - parseInt(cachedTime)) < cacheTTL;
+  const cacheKey = 'cachedBidNames';
+  const cacheTimestampKey = 'cachedBidNamesTimestamp';
+  const cacheTTL = 1000 * 60 * 30; // 30 minutes
+  const cachedData = localStorage.getItem(cacheKey);
+  const cachedTime = localStorage.getItem(cacheTimestampKey);
+  const isValidCache = cachedData && cachedTime && (Date.now() - parseInt(cachedTime, 10)) < cacheTTL;
 
-    if (isValidCache) {
-        bidNameSuggestions = JSON.parse(cachedData);
-        return;
+  if (isValidCache) {
+    const cached = JSON.parse(cachedData) || [];
+    bidNameSuggestions = cached.map(normalizeBid).filter(Boolean);
+    const seen = new Set();
+    bidNameSuggestions = bidNameSuggestions.filter(b => {
+      const key = b.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    // mark task as complete from cache (one page)
+    try {
+      VanirLoad.startTask('bids');
+      VanirLoad.pageArrived('bids', bidNameSuggestions.length, false);
+      VanirLoad.done('bids');
+    } catch {}
+    return;
+  }
+
+  // Live fetch with page visibility
+  const base = (typeof bidBaseName !== "undefined" ? bidBaseName : baseId);
+  const table = (typeof bidTableName !== "undefined" ? bidTableName : tableId);
+  const filter = "{Outcome}='Win'";
+
+  try { VanirLoad.startTask('bids'); } catch {}
+
+  let allRecords = [];
+  let offset = null;
+  do {
+    let url = `https://api.airtable.com/v0/${base}/${table}?pageSize=100`;
+    if (filter) url += `&filterByFormula=${encodeURIComponent(filter)}`;
+    if (offset) url += `&offset=${offset}`;
+
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${airtableApiKey}` }});
+    if (!response.ok) {
+      console.error(`HTTP Error: ${response.status} - ${response.statusText}`);
+      try { VanirLoad.done('bids'); } catch {}
+      return;
     }
+    const data = await response.json();
+    const pageRecs = Array.isArray(data.records) ? data.records : [];
+    allRecords = allRecords.concat(pageRecs);
 
-    const records = await fetchAirtableData(bidBaseName, bidTableName, 'Bid Name', "{Outcome}='Win'");
-    bidNameSuggestions = records.map(record => record.fields['Bid Name']).filter(Boolean);
+    // loader tick (per page)
+    try { VanirLoad.pageArrived('bids', pageRecs.length, !!data.offset); } catch {}
 
- sessionStorage.setItem(cacheKey, JSON.stringify(bidNameSuggestions));
-sessionStorage.setItem(cacheTimestampKey, Date.now().toString());
+    offset = data.offset || null;
+  } while (offset);
+
+  // Normalize & de-dup
+  const normalized = (allRecords || [])
+    .map(r => normalizeBid(r?.fields?.['Bid Name']))
+    .filter(Boolean);
+  const seen = new Set();
+  const unique = [];
+  for (const name of normalized) {
+    const key = name.toLowerCase();
+    if (!seen.has(key)) { seen.add(key); unique.push(name); }
+  }
+
+  bidNameSuggestions = unique;
+  localStorage.setItem(cacheKey, JSON.stringify(bidNameSuggestions));
+  localStorage.setItem(cacheTimestampKey, Date.now().toString());
+
+  try { VanirLoad.done('bids'); } catch {}
 }
 
 async function fetchSubcontractorSuggestions(branch) {
@@ -819,28 +1038,28 @@ function getArrayOrEmpty(fields, key) {
 // ---------- SAFE replacement for fetchDetailsByBidName ----------
 async function fetchDetailsByBidName(bidNameInput) {
   try {
-    // Allow being called with either a string or an autocomplete "suggestion" object
     const bidNameRaw = typeof bidNameInput === "string"
       ? bidNameInput
       : (bidNameInput?.companyName || bidNameInput?.text || "");
 
-    const bidName = (bidNameRaw || "").trim();
+    // 🔑 Normalize aggressively so trailing/leading spaces never break search
+    const bidName = normalizeBid(bidNameRaw);
     if (!bidName) {
       console.warn("⚠️ fetchDetailsByBidName called without a bid name.");
       return {};
     }
 
-    // Clear UI placeholders safely (uses your existing util if present)
     if (typeof clearAllDynamicSpans === "function") {
       clearAllDynamicSpans();
     }
 
-    // Build a *safe* filterByFormula
-    // Your code previously: AND({Bid Name} = "<bid>", {Outcome}='Win')
-    const safeBid = escapeForAirtableFilter(bidName);
+    // Use escaped, normalized bid for exact match
+    const safeBid = (typeof escapeForAirtableFilter === "function")
+      ? escapeForAirtableFilter(bidName)
+      : bidName.replace(/"/g, '\\"');
+
     const filterFormula = `AND({Bid Name} = "${safeBid}", {Outcome}='Win')`;
 
-    // Pull records (uses your existing fetchAirtableData)
     const records = await fetchAirtableData(
       typeof bidBaseName !== "undefined" ? bidBaseName : baseId,
       typeof bidTableName !== "undefined" ? bidTableName : tableId,
@@ -848,18 +1067,17 @@ async function fetchDetailsByBidName(bidNameInput) {
       filterFormula
     );
 
-    // If nothing back, bail quietly
     if (!Array.isArray(records) || records.length === 0) {
       console.warn("❌ No records returned for bid:", bidName);
       return {};
     }
 
-    // Exact match (case-insensitive, trimmed)
-    const exact = records.find(r => normalizeString(r?.fields?.["Bid Name"]) === normalizeString(bidName));
+    // Prefer exact (case-insensitive) match among returns, fallback to first
+    const exact = records.find(r => normalizeBid(r?.fields?.["Bid Name"]).toLowerCase() === bidName.toLowerCase());
     const chosen = exact || records[0];
     const fields = chosen?.fields || {};
 
-    // Extract fields **safely** (strings even if Airtable returns arrays or blanks)
+    // --- (unchanged: safe getters) ---
     const builder               = getFieldStr(fields, "Builder") || "Unknown Builder";
     const gmEmailRaw            = getArrayOrEmpty(fields, "GM Email");
     const gmEmail               = gmEmailRaw[0] || "Branch Staff@Vanir.com";
@@ -870,51 +1088,42 @@ async function fetchDetailsByBidName(bidNameInput) {
     const anticipatedStartDate  = getFieldStr(fields, "Anticipated Start Date");
     const anticipatedDuration   = getFieldStr(fields, "Anticipated Duration");
     const materialsNeeded       = getFieldStr(fields, "Materials Needed");
-    const acmEmail              = getFieldStr(fields, "Field's Email"); // from your original code
+    const acmEmail              = getFieldStr(fields, "Field's Email");
     const gmNamed               = getFieldStr(fields, "GM Named");
     const gm                    = gmNamed || (typeof deriveNameFromEmail === "function" ? deriveNameFromEmail(gmEmail) : "");
 
-    // Populate subcontractors based on branch (but only if present)
+    // Subcontractors by branch
     if (branch && typeof fetchSubcontractorSuggestions === "function") {
       await fetchSubcontractorSuggestions(branch);
       if (typeof updateSubcontractorAutocomplete === "function") {
         updateSubcontractorAutocomplete();
       }
-    } else {
-      console.warn("⚠️ No branch found in bid details, skipping subcontractor fetch.");
     }
 
-    // ----- Vendor matching (robust) -----
-    const vendorRaw = getFieldStr(fields, "vendor");        // may be "" if not set
-    const vendorNormalized = normalizeString(vendorRaw);
-    const vendors = (window.vendorData || []).slice();      // may be []
+    // Vendor matching (unchanged logic, still safe)
+    const vendorRaw = getFieldStr(fields, "vendor");
+    const vendorNormalized = (vendorRaw || "").toLowerCase().trim();
+    const vendors = (window.vendorData || []).slice();
     let matchingVendors = [];
 
-    if (!vendors.length) {
-      console.warn("⚠️ vendorData is empty or not loaded yet.");
-    } else if (vendorNormalized) {
-      // First try strict name match
-      matchingVendors = vendors.filter(v => normalizeString(v?.name) === vendorNormalized);
-
-      // If none, try first-word fuzzy (name/email)
-      if (matchingVendors.length === 0) {
+    if (vendors.length && vendorNormalized) {
+      matchingVendors = vendors.filter(v => (v?.name || "").toLowerCase().trim() === vendorNormalized);
+      if (!matchingVendors.length) {
         const firstWord = vendorNormalized.split(/\s+/)[0] || "";
         if (firstWord) {
           matchingVendors = vendors.filter(v => {
-            const n = normalizeString(v?.name);
-            const e = normalizeString(v?.email);
+            const n = (v?.name || "").toLowerCase();
+            const e = (v?.email || "").toLowerCase();
             return n.includes(firstWord) || e.includes(firstWord);
           });
         }
       }
     }
 
-    // Ensure DOM targets exist before we write
     if (typeof waitForElement === "function") {
       await waitForElement(".gmNameContainer");
     }
 
-    // Decide how to show vendor result(s)
     if (matchingVendors.length === 1) {
       const matched = matchingVendors[0];
       window.currentVendorEmail = matched?.email || "";
@@ -928,19 +1137,14 @@ async function fetchDetailsByBidName(bidNameInput) {
         document.querySelectorAll(".vendorEmailWrapper").forEach(el => el.textContent = matched?.email ? ` <${matched.email}>` : "");
       }
     } else if (matchingVendors.length > 1) {
-      // If branch appears in one, narrow; else present a picker
-      const branchText = normalizeString(
-        document.querySelector(".branchContainer")?.textContent || ""
-      );
-
+      const branchText = (document.querySelector(".branchContainer")?.textContent || "").toLowerCase().trim();
       let narrowed = matchingVendors;
       if (branchText) {
         narrowed = matchingVendors.filter(v =>
-          normalizeString(v?.name).includes(branchText) ||
-          normalizeString(v?.email).includes(branchText)
+          (v?.name || "").toLowerCase().includes(branchText) ||
+          (v?.email || "").toLowerCase().includes(branchText)
         );
       }
-
       if (narrowed.length === 1) {
         const matched = narrowed[0];
         window.currentVendorEmail = matched?.email || "";
@@ -948,18 +1152,13 @@ async function fetchDetailsByBidName(bidNameInput) {
         document.querySelectorAll(".vendorEmailWrapper").forEach(el => el.textContent = matched?.email ? ` <${matched.email}>` : "");
       } else if (typeof renderMatchingVendorsToDropdown === "function") {
         renderMatchingVendorsToDropdown(matchingVendors);
-      } else {
-        console.warn("⚠️ Multiple vendor matches but no dropdown renderer available.");
       }
     } else {
-      // No matches → optionally show a chooser of all vendors, or leave blank
-      console.warn(`⚠️ No close vendor matches for "${vendorRaw}" — showing all vendors (if UI available).`);
       if (typeof renderMatchingVendorsToDropdown === "function") {
         renderMatchingVendorsToDropdown(vendors);
       }
     }
 
-    // Update GM/ACM/UI spans
     if (typeof updateMultipleSpans === "function") {
       updateMultipleSpans(".gmNameContainer", gm);
       updateMultipleSpans(".gmEmailContainer", gmEmail);
@@ -970,10 +1169,9 @@ async function fetchDetailsByBidName(bidNameInput) {
       document.querySelectorAll(".acmEmailContainer").forEach(el => el.textContent = acmEmail || "");
     }
 
-    // Your existing template population (uses your existing function/signature)
     if (typeof updateTemplateText === "function") {
       updateTemplateText(
-        getFieldStr(fields, "Bid Name") || bidName, // subdivision in your template’s wording
+        getFieldStr(fields, "Bid Name") || bidName,
         builder,
         gmEmail,
         branch,
@@ -987,7 +1185,6 @@ async function fetchDetailsByBidName(bidNameInput) {
       );
     }
 
-    // Done — return structured data for any downstream usage
     return {
       builder,
       gmEmail,
@@ -1007,59 +1204,74 @@ async function fetchDetailsByBidName(bidNameInput) {
 }
 
 
+
 function showVendorSelectionDropdown(vendorMatches) {
-    const container = document.getElementById("vendorEmailContainer");
-    if (!container) {
-        console.error("No #vendorEmailContainer found.");
-        return;
+  const host = document.getElementById("vendorEmailContainer");
+  if (!host) { console.error("No #vendorEmailContainer found."); return; }
+
+  // Remove any previous dropdown
+  host.querySelector(".vendor-select-dropdown")?.remove();
+
+  // Build wrapper
+  const wrapper = document.createElement("div");
+  wrapper.className = "vendor-select-dropdown";
+  wrapper.style.position = "relative";
+  wrapper.style.border = "1px solid #ddd";
+  wrapper.style.borderRadius = "8px";
+  wrapper.style.padding = "10px";
+  wrapper.style.background = "#fff";
+  wrapper.style.maxHeight = "320px";
+  wrapper.style.overflow = "auto";
+  wrapper.style.boxShadow = "0 6px 18px rgba(0,0,0,.08)";
+  wrapper.style.marginTop = "8px";
+
+  const searchInput = document.createElement("input");
+  searchInput.type = "text";
+  searchInput.placeholder = "Search vendor…";
+  searchInput.style.width = "100%";
+  searchInput.style.marginBottom = "10px";
+  searchInput.style.padding = "8px";
+  searchInput.style.border = "1px solid #ddd";
+  searchInput.style.borderRadius = "6px";
+
+  const list = document.createElement("div");
+
+  function renderList(items) {
+    list.innerHTML = "";
+    if (!items.length) {
+      list.innerHTML = "<p style='margin:8px 0;color:#666;'>No matching vendors found.</p>";
+      return;
     }
-
-    // Clear any existing dropdown
-    const existing = container.querySelector(".vendor-select-dropdown");
-    if (existing) existing.remove();
-
-    const searchInput = document.createElement("input");
-    searchInput.type = "text";
-    searchInput.placeholder = "Search vendor...";
-    searchInput.style.width = "100%";
-    searchInput.style.marginBottom = "10px";
-    searchInput.style.padding = "5px";
-
-    const list = document.createElement("div");
-
-function renderList(filteredVendors) {
-        list.innerHTML = "";
-        if (!filteredVendors.length) {
-            list.innerHTML = "<p>No matching vendors found.</p>";
-            return;
-        }
-
-        filteredVendors.forEach(vendor => {
-            const option = document.createElement("div");
-            option.className = "vendor-select-option";
-            option.style.cursor = "pointer";
-            option.style.padding = "5px 0";
-option.innerHTML = `<strong>${vendor.name}</strong><br><small>${vendor.email}</small>`;
-
-option.addEventListener("click", () => {
-    window.currentVendorEmail = vendor.email;
-    document.querySelectorAll('.vendorNameContainer').forEach(el => el.textContent = vendor.name);
-    document.querySelectorAll('.vendorEmailWrapper').forEach(el => el.textContent = ` <${vendor.email}>`);
-    wrapper.remove(); // Close dropdown
-});
-            list.appendChild(option);
-        });
-    }
-
-    renderList(vendorMatches); // initial render
-
-    searchInput.addEventListener("input", () => {
-        const query = searchInput.value.trim().toLowerCase();
-        const filtered = vendorMatches.filter(v =>
-            v.name?.toLowerCase().includes(query) || v.email?.toLowerCase().includes(query)
-        );
-        renderList(filtered);
+    items.forEach(vendor => {
+      const option = document.createElement("div");
+      option.className = "vendor-select-option";
+      option.style.cursor = "pointer";
+      option.style.padding = "8px 4px";
+      option.style.borderBottom = "1px solid #f0f0f0";
+      option.innerHTML = `<strong>${vendor.name || ""}</strong><br><small>${vendor.email || ""}</small>`;
+      option.addEventListener("click", () => {
+        window.currentVendorEmail = vendor.email || "";
+        document.querySelectorAll(".vendorNameContainer").forEach(el => el.textContent = vendor.name || "");
+        document.querySelectorAll(".vendorEmailWrapper").forEach(el => el.textContent = vendor.email ? ` <${vendor.email}>` : "");
+        wrapper.remove(); // now valid
+      });
+      list.appendChild(option);
     });
+  }
+
+  // Initial render + search binding
+  renderList(Array.isArray(vendorMatches) ? vendorMatches : []);
+  searchInput.addEventListener("input", () => {
+    const q = searchInput.value.trim().toLowerCase();
+    const filtered = (vendorMatches || []).filter(v =>
+      (v.name || "").toLowerCase().includes(q) || (v.email || "").toLowerCase().includes(q)
+    );
+    renderList(filtered);
+  });
+
+  wrapper.appendChild(searchInput);
+  wrapper.appendChild(list);
+  host.appendChild(wrapper);
 }
 
 function renderMatchingVendorsToDropdown(matchingVendors) {
@@ -1143,122 +1355,162 @@ function setupCopySubEmailsButton() {
 
 // Unified function to create an autocomplete input
 function createAutocompleteInput(placeholder, suggestions, type, fetchDetailsCallback, disabled = false) {
-    const wrapper = document.createElement("div");
-    wrapper.classList.add(`${type}-autocomplete-wrapper`, "autocomplete-wrapper");
+  const wrapper = document.createElement("div");
+  wrapper.classList.add(`${type}-autocomplete-wrapper`, "autocomplete-wrapper");
 
-    const input = document.createElement("input");
-    input.type = "text";
-    input.placeholder = placeholder;
-    input.classList.add(`${type}-autocomplete-input`, "autocomplete-input");
-    input.dataset.type = type;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = placeholder;
+  input.classList.add(`${type}-autocomplete-input`, "autocomplete-input");
+  input.dataset.type = type;
 
-// --- Spinner / loading UI ---
-const loadingSpinner = document.createElement("div");
-loadingSpinner.className = "autocomplete-loading";
-loadingSpinner.innerHTML = `
-  <span class="spinner" style="display:inline-block;vertical-align:middle;margin-right:8px;"></span>
-  <span style="color:#888;font-size:24px;">Loading bids...</span>
-`;
-loadingSpinner.style.display = disabled ? "block" : "none";
+  const loadingSpinner = document.createElement("div");
+  loadingSpinner.className = "autocomplete-loading";
+  loadingSpinner.innerHTML = `
+    <span class="spinner" style="display:inline-block;vertical-align:middle;margin-right:8px;"></span>
+    <span style="color:#888;font-size:24px;">Loading bids...</span>
+  `;
+  loadingSpinner.style.display = disabled ? "block" : "none";
 
-    // Optionally disable input
-    if (disabled) {
-        input.disabled = true;
-        input.style.background = "#f5f5f5";
-        input.style.color = "#bbb";
-        input.style.cursor = "not-allowed";
-    }
+  if (disabled) {
+    input.disabled = true;
+    input.style.background = "#f5f5f5";
+    input.style.color = "#bbb";
+    input.style.cursor = "not-allowed";
+  }
 
-    const dropdown = document.createElement("div");
-    dropdown.classList.add(`${type}-autocomplete-dropdown`, "autocomplete-dropdown");
+  const dropdown = document.createElement("div");
+  dropdown.classList.add(`${type}-autocomplete-dropdown`, "autocomplete-dropdown");
 
-    let currentFocusIndex = -1; // Tracks arrow key focus
-    let currentOptions = [];    // Cache for clickable options
+  let currentFocusIndex = -1;
+  let currentOptions = [];
 
-    input.addEventListener("input", async function () {
-        const inputValue = input.value.toLowerCase();
+  function renderOptions(filtered) {
+    dropdown.innerHTML = '';
+    currentFocusIndex = -1;
+    currentOptions = [];
+
+    filtered.forEach((suggestion) => {
+      const text = typeof suggestion === 'string' ? suggestion : suggestion.companyName;
+      const option = document.createElement("div");
+      option.classList.add(`${type}-autocomplete-option`, "autocomplete-option");
+      option.textContent = text;
+      option.addEventListener("click", () => {
+        input.value = text;
         dropdown.innerHTML = '';
-        currentFocusIndex = -1;
-        currentOptions = [];
-
-        if (suggestions && Array.isArray(suggestions)) {
-            const filteredSuggestions = suggestions.filter(item => {
-                const text = typeof item === 'string' ? item : item.companyName;
-                return text.toLowerCase().includes(inputValue);
-            });
-
-            filteredSuggestions.forEach((suggestion, index) => {
-                const text = typeof suggestion === 'string' ? suggestion : suggestion.companyName;
-                const option = document.createElement("div");
-                option.classList.add(`${type}-autocomplete-option`, "autocomplete-option");
-                option.textContent = text;
-
-                option.addEventListener("click", () => {
-                    input.value = text;
-                    dropdown.innerHTML = '';
-                    fetchDetailsCallback?.(suggestion);
-                });
-
-                dropdown.appendChild(option);
-                currentOptions.push(option);
-            });
-
-            dropdown.style.display = filteredSuggestions.length > 0 ? 'block' : 'none';
-        }
-
-        if (fetchDetailsCallback && inputValue.length > 0) {
-            const details = await fetchDetailsCallback(inputValue);
-            if (details?.city) {
-                const citySpan = document.querySelector(".city");
-                if (citySpan) citySpan.innerText = details.city;
-            }
-        }
+        fetchDetailsCallback?.(text);
+      });
+      dropdown.appendChild(option);
+      currentOptions.push(option);
     });
 
- input.addEventListener("keydown", (e) => {
-    if (!currentOptions.length) return;
+    dropdown.style.display = filtered.length > 0 ? 'block' : 'none';
+  }
 
-    if (e.key === "ArrowDown") {
-        e.preventDefault();
-        currentFocusIndex = (currentFocusIndex + 1) % currentOptions.length;
-        highlightOption(currentFocusIndex);
-    } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        currentFocusIndex = (currentFocusIndex - 1 + currentOptions.length) % currentOptions.length;
-        highlightOption(currentFocusIndex);
-    } else if (e.key === "Enter") {
-        e.preventDefault();
-        if (currentFocusIndex >= 0) {
-            currentOptions[currentFocusIndex].click();
-        }
+  input.addEventListener("input", async function () {
+    const raw = input.value;
+    const normQuery = normalizeBid(raw).toLowerCase();
+
+    // When there is no query, close dropdown and stop
+    if (!normQuery) {
+      dropdown.innerHTML = '';
+      dropdown.style.display = 'none';
+      return;
     }
-});
 
-    function highlightOption(index) {
-    currentOptions.forEach((option, i) => {
-        if (i === index) {
-            option.classList.add("selected");
-            option.scrollIntoView({ block: 'nearest' });
-        } else {
-            option.classList.remove("selected");
-        }
+    // Normalize suggestions for filtering (but keep original text for display)
+    const pool = Array.isArray(suggestions) ? suggestions.slice() : [];
+    const filtered = pool.filter(item => {
+      const text = typeof item === 'string' ? item : item.companyName;
+      return normalizeBid(text).toLowerCase().includes(normQuery);
     });
+
+    // ✅ If exactly one match, auto-select it (no click needed)
+    if (filtered.length === 1) {
+      const only = filtered[0];
+      const text = typeof only === 'string' ? only : only.companyName;
+      input.value = normalizeBid(text); // write the nice, trimmed value
+      dropdown.innerHTML = '';
+      dropdown.style.display = 'none';
+      await fetchDetailsCallback?.(text);
+      return; // stop here so we don’t re-render a one-item dropdown
+    }
+
+    // Otherwise, show a dropdown to choose
+    renderOptions(filtered);
+
+    // (Optional) live detail fetch as user types (safe—no selection required)
+    if (fetchDetailsCallback && normQuery.length > 0) {
+      try { await fetchDetailsCallback(raw); } catch {}
+    }
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      // If dropdown is open and an item is highlighted, use it
+      if (currentOptions.length && currentFocusIndex >= 0) {
+        e.preventDefault();
+        currentOptions[currentFocusIndex].click();
+        return;
+      }
+
+      // If there is exactly one possible suggestion (based on current filter), auto-select
+      const raw = input.value;
+      const normQuery = normalizeBid(raw).toLowerCase();
+      const pool = Array.isArray(suggestions) ? suggestions.slice() : [];
+      const filtered = pool.filter(item => {
+        const text = typeof item === 'string' ? item : item.companyName;
+        return normalizeBid(text).toLowerCase().includes(normQuery);
+      });
+
+      if (filtered.length === 1) {
+        e.preventDefault();
+        const only = filtered[0];
+        const text = typeof only === 'string' ? only : only.companyName;
+        input.value = normalizeBid(text);
+        dropdown.innerHTML = '';
+        dropdown.style.display = 'none';
+        fetchDetailsCallback?.(text);
+      }
+    } else if (e.key === "ArrowDown" && currentOptions.length) {
+      e.preventDefault();
+      currentFocusIndex = (currentFocusIndex + 1) % currentOptions.length;
+      highlightOption(currentFocusIndex);
+    } else if (e.key === "ArrowUp" && currentOptions.length) {
+      e.preventDefault();
+      currentFocusIndex = (currentFocusIndex - 1 + currentOptions.length) % currentOptions.length;
+      highlightOption(currentFocusIndex);
+    }
+  });
+
+  function highlightOption(index) {
+    currentOptions.forEach((option, i) => {
+      if (i === index) {
+        option.classList.add("selected");
+        option.scrollIntoView({ block: 'nearest' });
+      } else {
+        option.classList.remove("selected");
+      }
+    });
+  }
+
+  wrapper.appendChild(input);
+  wrapper.appendChild(loadingSpinner);
+  wrapper.appendChild(dropdown);
+
+  // helper to enable after data loads
+  wrapper.enableInput = function () {
+    input.disabled = false;
+    input.style.background = "";
+    input.style.color = "";
+    input.style.cursor = "";
+    loadingSpinner.style.display = "none";
+    input.focus();
+  };
+
+  return wrapper;
 }
-    wrapper.appendChild(input);
-    wrapper.appendChild(loadingSpinner);
-    wrapper.appendChild(dropdown);
 
-    // --- Add helper method to enable input and hide spinner ---
-    wrapper.enableInput = function () {
-        input.disabled = false;
-        input.style.background = "";
-        input.style.color = "";
-        input.style.cursor = "";
-        loadingSpinner.style.display = "none";
-        input.focus();
-    };
-
-    return wrapper;
 
     function highlightOption(index) {
         currentOptions.forEach((option, i) => {
@@ -1270,7 +1522,7 @@ loadingSpinner.style.display = disabled ? "block" : "none";
             }
         });
     }
-}
+
 
 // Select suggestion to update email field
 function selectSuggestion(suggestion, input, dropdown) {
@@ -1425,13 +1677,140 @@ if (emailTemplateContainer) {
     check();
   });
 }
+// === USER-DRIVEN REFRESH ===
+document.getElementById("refreshBidsBtn")?.addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget;
+  try {
+    setBtnBusy(btn, true);
+    updateDataStatus("ok", "Refreshing…");
+
+    // Pull fresh vendors and bids in parallel
+    await Promise.all([
+      fetchAllVendorData(),      // fills sessionStorage + window.vendorData
+      fetchBidNameSuggestions(), // fills localStorage + window.bidNameSuggestions
+    ]);
+
+    // Refill autocomplete with the new list
+    updateAutocompleteOptions("bid", Array.isArray(window.bidNameSuggestions) ? window.bidNameSuggestions : []);
+
+    // Ensure the bid input (if initially disabled) is now enabled
+    try { window.bidAutocompleteInputWrapper?.enableInput?.(); } catch {}
+
+    const count = (window.bidNameSuggestions || []).length;
+    updateDataStatus("ok", `Loaded ${count} bids just now`);
+  } catch (err) {
+    console.error("[refresh] failed:", err);
+    updateDataStatus("error", "Refresh failed — check console");
+  } finally {
+    setBtnBusy(btn, false);
+  }
+});
+
+
+document.addEventListener("DOMContentLoaded", async () => {
+  try {
+    renderBidInputImmediately();
+    hydrateBidSuggestionsFromCache();
+
+    // Start both
+    await Promise.all([
+      fetchAllVendorData(),
+      fetchBidNameSuggestions(),
+    ]);
+
+    // Refill UI
+    updateAutocompleteOptions("bid", window.bidNameSuggestions || []);
+    window.bidAutocompleteInputWrapper?.enableInput?.();
+
+    // Your other UI wiring...
+    createVendorAutocompleteInput();
+    autoProgressLoading?.(isBidInputVisible); // if you still want a soft animation in parallel
+  } catch (err) {
+    console.error("[boot] failed:", err);
+  }
+});
+
+
+function wireBidInput() {
+  const input = document.getElementById("bidInput");
+  if (!input) return;
+
+  // 1) Debounced typing: only update suggestion list (no details fetch here)
+  const onType = debounce(() => {
+    const val = input.value || "";
+    const nval = window.normalizeBid(val);
+
+    // filter suggestions locally
+    const list = (window.bidNameSuggestions || []).filter(s =>
+      (s || "").toLowerCase().includes((nval || "").toLowerCase())
+    );
+
+    updateAutocompleteOptions("bid", list);
+
+    // If there is exactly one suggestion and it's an EXACT match, auto-commit
+    if (isExactSuggestionMatch(nval, list)) {
+      commitBidSelection(nval);
+    }
+  }, 180);
+
+  input.addEventListener("input", onType);
+
+  // 2) When the user presses Enter or blurs with an exact single suggestion, commit
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      const val = window.normalizeBid(input.value);
+      const list = (window.bidNameSuggestions || []).filter(s =>
+        (s || "").toLowerCase().includes((val || "").toLowerCase())
+      );
+      if (isExactSuggestionMatch(val, list)) {
+        ev.preventDefault();
+        commitBidSelection(val);
+      }
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    const val = window.normalizeBid(input.value);
+    const list = (window.bidNameSuggestions || []).filter(s =>
+      (s || "").toLowerCase().includes((val || "").toLowerCase())
+    );
+    if (isExactSuggestionMatch(val, list)) {
+      commitBidSelection(val);
+    }
+  });
+}
+let __VENDOR_CACHE_INIT_DONE = false;
+async function hydrateVendorCacheOnce() {
+  if (__VENDOR_CACHE_INIT_DONE) return window.vendorData || [];
+  __VENDOR_CACHE_INIT_DONE = true;
+  try {
+    // Try cache only; do not force network here
+    const ts = Number(sessionStorage.getItem("cachedVendorsTimestamp") || 0);
+    const cached = JSON.parse(sessionStorage.getItem("cachedVendors") || "[]");
+    if (ts && Array.isArray(cached) && cached.length) {
+      window.vendorData = cached;
+      console.log("✅ Vendor cache hydrated once.");
+      return cached;
+    }
+  } catch {}
+  // If no cache, load from network once (optional)
+  return fetchAllVendorData({ force: true });
+}
+
+async function commitBidSelection(bidName) {
+  try {
+    document.querySelectorAll(".bidNameContainer").forEach(el => el.textContent = bidName);
+  } catch {}
+  try {
+    await fetchDetailsByBidName(bidName); // now we only call this on committed selection or exact one
+  } catch (e) {
+    console.error("Failed loading bid details:", e);
+  }
+}
 
 document.addEventListener("DOMContentLoaded", async () => {
   const bidContainer = await waitForOrCreateBidInputContainer();
   initializeBidAutocomplete(); // now safe to call
-});
-document.querySelectorAll('.bidNameContainer').forEach(el => {
-  el.textContent = selectedBidName;
 });
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -1482,7 +1861,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
       });
     });
-    textareaObserver.observe(document.body, { childList: true, subtree: true });
 
     // 8️⃣ Username preview sync
     const userNameInput = document.getElementById("inputUserName");
@@ -3183,3 +3561,156 @@ async function waitForElement(selector, timeout = 5000) {
 
 })(); // end IIFE
 
+/* === Adaptive Loading Tracker =========================================== */
+(() => {
+  if (window.VanirLoad) return; // singleton
+
+  class RollingRate {
+    constructor(alpha=0.25) { this.alpha = alpha; this.rate = 0; this.lastT = 0; this.lastC = 0; }
+    mark(t, c){
+      if (!this.lastT) { this.lastT = t; this.lastC = c; return; }
+      const dt = Math.max(0.001, (t - this.lastT)/1000);
+      const dc = Math.max(0, c - this.lastC);
+      const inst = dc / dt;                 // units per second
+      this.rate = this.rate ? (this.alpha*inst + (1-this.alpha)*this.rate) : inst;
+      this.lastT = t; this.lastC = c;
+    }
+    getRate(){ return this.rate || 0; }
+  }
+
+  // Internal overlay DOM
+  function ensureOverlay(){
+    let ov = document.getElementById('vanirLoaderOverlay');
+    if (ov) return ov;
+    ov = document.createElement('div');
+    ov.id = 'vanirLoaderOverlay';
+    ov.innerHTML = `
+      <div class="vanir-loader-card" role="status" aria-live="polite">
+        <div class="vl-head">
+          <div class="vl-title">Preparing data…</div>
+        </div>
+        <div class="vl-sub">Fetching winning bids, vendors, and wiring inputs.</div>
+        <div class="vl-bar"><div class="vl-fill" id="vlFill"></div></div>
+        <div class="vl-meta">
+          <div class="vl-rows" id="vlRows">0 records • 0 pages</div>
+          <div class="vl-eta" id="vlEta">ETA —</div>
+        </div>
+        <div class="vl-steps" id="vlSteps">
+          <div class="vl-step" data-step="bids"><span class="vl-dot"></span>Bids <small id="vlBidsMeta"></small></div>
+          <div class="vl-step" data-step="vendors"><span class="vl-dot"></span>Vendors <small id="vlVendorsMeta"></small></div>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    return ov;
+  }
+  function setStepState(step, state){ // state: 'idle' | 'active' | 'done'
+    const el = document.querySelector(`.vl-step[data-step="${step}"]`);
+    if (!el) return;
+    el.classList.remove('idle','active','done');
+    el.classList.add(state);
+  }
+  function fmt(n){ return (n||0).toLocaleString(); }
+  function fmtTime(sec){
+    if (!Number.isFinite(sec) || sec <= 0) return '—';
+    if (sec < 60) return `${Math.ceil(sec)}s`;
+    const m = Math.floor(sec/60), s = Math.ceil(sec%60);
+    return `${m}m ${s}s`;
+  }
+
+  class AdaptiveTask {
+    constructor(name, weight){
+      this.name = name; this.weight = weight;
+      this.pages = 0; this.records = 0;
+      this.estimateTotalPages = 1; // adaptive total; grows as we see offsets
+      this.rate = new RollingRate(0.3);
+      this.started = 0; this.done = false;
+    }
+    start(){ this.started = Date.now(); setStepState(this.name, 'active'); }
+    tickPage(recCountOnPage){
+      this.pages += 1;
+      this.records += (recCountOnPage || 0);
+      // When a page arrives, we "predict" at least one more page exists until proven done
+      // so total = max(current+1, previous total) — keeps progress < 100% while fetching.
+      this.estimateTotalPages = Math.max(this.estimateTotalPages, this.pages + 1);
+      this.rate.mark(Date.now(), this.pages);
+    }
+    markHasMore(){ this.estimateTotalPages = Math.max(this.estimateTotalPages, this.pages + 1); }
+    finish(){
+      this.done = true;
+      this.estimateTotalPages = Math.max(this.pages, this.estimateTotalPages);
+      setStepState(this.name, 'done');
+    }
+    progress(){ // 0..1 for this task
+      const denom = Math.max(1, this.estimateTotalPages);
+      return Math.min(1, this.pages / denom);
+    }
+    etaSeconds(){
+      const r = this.rate.getRate(); // pages/sec
+      if (!r) return NaN;
+      const remainPages = Math.max(0, this.estimateTotalPages - this.pages);
+      return remainPages / r;
+    }
+  }
+
+  class AdaptiveLoader {
+    constructor(){
+      this.tasks = {
+        bids: new AdaptiveTask('bids', 0.5),
+        vendors: new AdaptiveTask('vendors', 0.5),
+      };
+      this.overlay = null;
+      this.timer = null;
+    }
+    show(){
+      if (!this.overlay) this.overlay = ensureOverlay();
+      // initial step states
+      setStepState('bids','active');
+      setStepState('vendors','idle');
+      this.loop();
+    }
+    hide(){
+      if (this.timer) { cancelAnimationFrame(this.timer); this.timer = null; }
+      const ov = this.overlay;
+      if (ov) { ov.style.opacity = '0'; setTimeout(()=> ov.remove(), 220); }
+      this.overlay = null;
+    }
+    // public hooks you can call from your fetchers
+    startTask(name){ this.tasks[name]?.start(); if (!this.overlay) this.show(); }
+    pageArrived(name, recordsOnThisPage, hasMore){
+      const t = this.tasks[name]; if (!t) return;
+      t.tickPage(recordsOnThisPage);
+      if (hasMore) t.markHasMore();
+    }
+    done(name){ this.tasks[name]?.finish(); }
+    loop = () => {
+      const fill = document.getElementById('vlFill');
+      const rows = document.getElementById('vlRows');
+      const eta  = document.getElementById('vlEta');
+      const bidsMeta = document.getElementById('vlBidsMeta');
+      const vendMeta = document.getElementById('vlVendorsMeta');
+
+      const b = this.tasks.bids, v = this.tasks.vendors;
+
+      const pct = Math.round(100 * (b.progress()*b.weight + v.progress()*v.weight));
+      if (fill) fill.style.width = `${pct}%`;
+
+      const totalRecs = (b.records + v.records);
+      const totalPages = (b.pages + v.pages);
+      if (rows) rows.textContent = `${fmt(totalRecs)} records • ${fmt(totalPages)} pages`;
+
+      if (bidsMeta)   bidsMeta.textContent = `${fmt(b.records)} rec • ${fmt(b.pages)}/${fmt(Math.max(b.pages, b.estimateTotalPages))} pg`;
+      if (vendMeta)   vendMeta.textContent = `${fmt(v.records)} rec • ${fmt(v.pages)}/${fmt(Math.max(v.pages, v.estimateTotalPages))} pg`;
+
+      // ETA: sum of per-task ETA (weighted by how incomplete they are)
+      const etaB = b.done ? 0 : b.etaSeconds();
+      const etaV = v.done ? 0 : v.etaSeconds();
+      const etaMix = (Number.isFinite(etaB)?etaB:0) + (Number.isFinite(etaV)?etaV:0);
+      if (eta) eta.textContent = `ETA ${fmtTime(etaMix)}`;
+
+      if (b.done && v.done) { this.hide(); return; }
+      this.timer = requestAnimationFrame(this.loop);
+    }
+  }
+
+  window.VanirLoad = new AdaptiveLoader();
+})();

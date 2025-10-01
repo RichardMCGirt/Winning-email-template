@@ -19,6 +19,11 @@
     </label>
     <span id="toggleLabel">Dark Mode</span>
   </div>
+<!-- Refresh control + status line -->
+<div class="fetch-controls" id="fetchControls" style="margin:12px 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+  <button id="refreshBidsBtn" type="button" class="btn" aria-label="Refresh bid list">Refresh Bids</button>
+  <span id="dataStatus" class="muted-sm" aria-live="polite"></span>
+</div>
 
   <!-- ========== EMAIL TEMPLATE OUTPUT ========== -->
   <div id="emailTemplate"></div>
