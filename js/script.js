@@ -220,11 +220,18 @@
 const airtableApiKey = 'patCnUsdz4bORwYNV.5c27cab8c99e7caf5b0dc05ce177182df1a9d60f4afc4a5d4b57802f44c65328';
 const bidBaseName = 'appK9gZS77OmsIK50';
 const bidTableName = 'tblQo2148s04gVPq1';
-const viewId = "viwTnwtcQkhpZEJ3q";
+const viewId = "viwJrqe60OdxOUrpr";
 const baseId = "appK9gZS77OmsIK50";
 const tableId = "tblQo2148s04gVPq1";
 const PAGE_SIZE = 100; // max allowed
 let offset = null;
+// --- Bridge constants to globals expected by fetchAllVendorData ---
+window.AIRTABLE_API_KEY  = window.AIRTABLE_API_KEY  || airtableApiKey;
+
+// Set these to the base/table that actually hold your Vendors.
+// If your Vendors live in the same base as bids:
+window.AT_VENDOR_BASE_ID  = window.AT_VENDOR_BASE_ID  || "appK9gZS77OmsIK50";  // Vendors base id
+window.AT_VENDOR_TABLE_ID = window.AT_VENDOR_TABLE_ID || "tbllFcCzQfRATm6dI";  // Vendors table id (field "Name", email lookup)
 
 // Ensure vendorData is declared before assignment/usage
 let vendorData = [];
@@ -556,6 +563,21 @@ document.addEventListener('DOMContentLoaded', () => {
     monitorSubdivisionChanges();
     setupCopySubEmailsButton(); 
 });
+// Normalize bid name in Airtable filter: collapse whitespace + trim + lower
+function buildBidNameEqualsFormula(normalizedBid) {
+  // JS string needs "\\\\s+" to produce "\\s+" inside Airtable formula
+  const norm = String(normalizedBid || "");
+  const safe = (typeof escapeForAirtableFilter === "function")
+    ? escapeForAirtableFilter(norm)
+    : norm.replace(/"/g, '\\"');
+
+  // AND({Outcome}='Win', normalized({Bid Name}) = normalized("input"))
+  // REGEX_REPLACE collapses runs of whitespace, TRIM removes ends, LOWER ignores case
+  return `AND(
+    {Outcome}='Win',
+    LOWER(TRIM(REGEX_REPLACE({Bid Name}, '\\\\s+', ' '))) = LOWER("${safe}")
+  )`;
+}
 
 function updateAutocompleteOptions(type, newSuggestions = []) {
   const input = document.querySelector(`.${type}-autocomplete-input`);
@@ -622,13 +644,14 @@ function addCitySpan() {
     citySpan.className = "city";
     container.appendChild(citySpan);
 }
+// Helper stays once in the file (you already have it above)
+// Helper stays once in the file (you already have it above)
+function getFirstScalar(val) {
+  if (Array.isArray(val)) return val[0] ?? "";
+  if (val == null) return "";
+  return String(val);
+}
 
-// ============================================================================
-// REPLACE your current fetchAllVendorData with this fully-paginated version.
-// ============================================================================
-// ============================================================================
-// Vendors: fully paginated with AdaptiveLoader hooks (DROP-IN REPLACEMENT)
-// ============================================================================
 async function fetchAllVendorData(opts = {}) {
   const force = !!opts.force;
 
@@ -636,6 +659,7 @@ async function fetchAllVendorData(opts = {}) {
   const CACHE_TS  = "cachedVendorsTimestamp";
   const MAX_AGE_MS = 1000 * 60 * 60 * 24; // 24h
 
+  // ✅ Read from cache if fresh
   try {
     const ts = Number(sessionStorage.getItem(CACHE_TS) || 0);
     const age = Date.now() - ts;
@@ -643,7 +667,8 @@ async function fetchAllVendorData(opts = {}) {
       const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) || "[]");
       if (Array.isArray(cached) && cached.length) {
         window.vendorData = cached;
-        // mark task as instantly done from cache (one page)
+        // NEW: keep ID→vendor map even when hydrated from cache
+        window.vendorById = Object.fromEntries(cached.map(v => [v.id, v]));
         try {
           VanirLoad.startTask('vendors');
           VanirLoad.pageArrived('vendors', cached.length, false);
@@ -656,6 +681,7 @@ async function fetchAllVendorData(opts = {}) {
     console.warn("⚠️ Vendor cache read failed; will refetch.", e);
   }
 
+  // One page fetcher
   async function _fetchPage({ baseId, tableId, offset }) {
     const url = new URL(`https://api.airtable.com/v0/${baseId}/${tableId}`);
     url.searchParams.set("pageSize", "100");
@@ -673,6 +699,7 @@ async function fetchAllVendorData(opts = {}) {
     return res.json();
   }
 
+  // ✅ Respect your already-defined IDs
   const baseId  = window.AT_VENDOR_BASE_ID  || window.AT_BASE_ID || window.BASE_ID;
   const tableId = window.AT_VENDOR_TABLE_ID || "Vendors";
   if (!baseId || !tableId || !window.AIRTABLE_API_KEY) {
@@ -694,19 +721,32 @@ async function fetchAllVendorData(opts = {}) {
 
     for (const r of records) {
       const f = r.fields || {};
+      const name =
+        getFirstScalar(f["Name"]) ||
+        getFirstScalar(f["Vendor Name"]) ||
+        getFirstScalar(f["Company"]) ||
+        "";
+
+      // tolerant to lookup/array emails
+      const email =
+        getFirstScalar(f["Vendor Email"]) ||
+        getFirstScalar(f["Email"]) ||
+        getFirstScalar(f["E-mail"]) ||
+        getFirstScalar(f["Primary Email"]) ||
+        "";
+
       all.push({
         id: r.id,
-        name: f["Vendor Name"] || f["Name"] || f["Company"] || "",
-        email: f["Email"] || f["E-mail"] || f["Primary Email"] || "",
+        name: String(name || "").trim(),
+        email: String(email || "").trim(),
       });
     }
 
-    // progress hook per page
     try { VanirLoad.pageArrived('vendors', records.length, !!data?.offset); } catch {}
-
     offset = data?.offset;
   } while (offset);
 
+  // de-dup
   const dedup = [];
   const seen = new Set();
   for (const v of all) {
@@ -716,17 +756,22 @@ async function fetchAllVendorData(opts = {}) {
     dedup.push(v);
   }
 
+  // cache
   try {
-    sessionStorage.setItem("cachedVendors", JSON.stringify(dedup));
-    sessionStorage.setItem("cachedVendorsTimestamp", String(Date.now()));
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify(dedup));
+    sessionStorage.setItem(CACHE_TS, String(Date.now()));
   } catch (e) {
     console.warn("⚠️ Vendor cache write failed.", e);
   }
 
+  // ✅ expose both list and ID→vendor map
   window.vendorData = dedup;
+  window.vendorById = Object.fromEntries(dedup.map(v => [v.id, v]));
+
   try { VanirLoad.done('vendors'); } catch {}
   return dedup;
 }
+
 
 
 // Simple debounce
@@ -880,45 +925,59 @@ function appendEmailsForSelectedBid(selectedBid) {
 // ============================================================================
 // Bids: cache-aware + AdaptiveLoader page hooks (DROP-IN REPLACEMENT)
 // ============================================================================
-async function fetchBidNameSuggestions() {
+// ============================================================================
+// Bids: cache-aware, view-scoped, force-able, with clear counts
+// ============================================================================
+async function fetchBidNameSuggestions(opts = {}) {
+  const { force = false } = opts;
+
   const cacheKey = 'cachedBidNames';
   const cacheTimestampKey = 'cachedBidNamesTimestamp';
   const cacheTTL = 1000 * 60 * 30; // 30 minutes
-  const cachedData = localStorage.getItem(cacheKey);
-  const cachedTime = localStorage.getItem(cacheTimestampKey);
-  const isValidCache = cachedData && cachedTime && (Date.now() - parseInt(cachedTime, 10)) < cacheTTL;
 
-  if (isValidCache) {
-    const cached = JSON.parse(cachedData) || [];
-    bidNameSuggestions = cached.map(normalizeBid).filter(Boolean);
-    const seen = new Set();
-    bidNameSuggestions = bidNameSuggestions.filter(b => {
-      const key = b.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+  // If force is requested, ignore cache
+  if (!force) {
+    const cachedData = localStorage.getItem(cacheKey);
+    const cachedTime = localStorage.getItem(cacheTimestampKey);
+    const isValidCache = cachedData && cachedTime && (Date.now() - parseInt(cachedTime, 10)) < cacheTTL;
 
-    // mark task as complete from cache (one page)
-    try {
-      VanirLoad.startTask('bids');
-      VanirLoad.pageArrived('bids', bidNameSuggestions.length, false);
-      VanirLoad.done('bids');
-    } catch {}
-    return;
+    if (isValidCache) {
+      const cached = JSON.parse(cachedData) || [];
+      // Normalize + unique as before
+      const seen = new Set();
+      const unique = [];
+      for (const name of (cached.map(normalizeBid).filter(Boolean))) {
+        const key = name.toLowerCase();
+        if (!seen.has(key)) { seen.add(key); unique.push(name); }
+      }
+      window.bidNameSuggestions = unique;
+
+      // Mark task as complete from cache
+      try {
+        VanirLoad.startTask('bids');
+        VanirLoad.pageArrived('bids', unique.length, false);
+        VanirLoad.done('bids');
+      } catch {}
+
+      // Status explains counts are from cache
+      updateDataStatus("ok", `Loaded ${unique.length} unique bids (cache)`);
+      return { rawRecordCount: unique.length, uniqueNameCount: unique.length, fromCache: true };
+    }
   }
 
-  // Live fetch with page visibility
-  const base = (typeof bidBaseName !== "undefined" ? bidBaseName : baseId);
-  const table = (typeof bidTableName !== "undefined" ? bidTableName : tableId);
+  // Live fetch (view-scoped) with page visibility
+  const base   = (typeof bidBaseName  !== "undefined" ? bidBaseName  : baseId);
+  const table  = (typeof bidTableName !== "undefined" ? bidTableName : tableId);
   const filter = "{Outcome}='Win'";
+  // If you have a viewId, include it so the API matches the view's count
+  const viewParam = (typeof viewId === "string" && viewId) ? `&view=${encodeURIComponent(viewId)}` : "";
 
   try { VanirLoad.startTask('bids'); } catch {}
 
   let allRecords = [];
   let offset = null;
   do {
-    let url = `https://api.airtable.com/v0/${base}/${table}?pageSize=100`;
+    let url = `https://api.airtable.com/v0/${base}/${table}?pageSize=100${viewParam}`;
     if (filter) url += `&filterByFormula=${encodeURIComponent(filter)}`;
     if (offset) url += `&offset=${offset}`;
 
@@ -926,8 +985,10 @@ async function fetchBidNameSuggestions() {
     if (!response.ok) {
       console.error(`HTTP Error: ${response.status} - ${response.statusText}`);
       try { VanirLoad.done('bids'); } catch {}
-      return;
+      updateDataStatus("error", "Bids fetch failed — see console");
+      return { rawRecordCount: 0, uniqueNameCount: 0, fromCache: false };
     }
+
     const data = await response.json();
     const pageRecs = Array.isArray(data.records) ? data.records : [];
     allRecords = allRecords.concat(pageRecs);
@@ -938,10 +999,14 @@ async function fetchBidNameSuggestions() {
     offset = data.offset || null;
   } while (offset);
 
-  // Normalize & de-dup
+  // Record count from the API (should align with your view now)
+  const rawRecordCount = allRecords.length;
+
+  // Normalize & de-dup the names for suggestions
   const normalized = (allRecords || [])
     .map(r => normalizeBid(r?.fields?.['Bid Name']))
     .filter(Boolean);
+
   const seen = new Set();
   const unique = [];
   for (const name of normalized) {
@@ -949,12 +1014,18 @@ async function fetchBidNameSuggestions() {
     if (!seen.has(key)) { seen.add(key); unique.push(name); }
   }
 
-  bidNameSuggestions = unique;
-  localStorage.setItem(cacheKey, JSON.stringify(bidNameSuggestions));
+  window.bidNameSuggestions = unique;
+  localStorage.setItem(cacheKey, JSON.stringify(unique));
   localStorage.setItem(cacheTimestampKey, Date.now().toString());
 
   try { VanirLoad.done('bids'); } catch {}
+
+  // ✅ Show BOTH numbers so it's clear why 2,780 ≠ 2,923
+  updateDataStatus("ok", `Fetched ${rawRecordCount} records • ${unique.length} unique bid names`);
+
+  return { rawRecordCount, uniqueNameCount: unique.length, fromCache: false };
 }
+
 
 async function fetchSubcontractorSuggestions(branch) {
     if (!branch) {
@@ -1034,6 +1105,54 @@ function getArrayOrEmpty(fields, key) {
   if (typeof v === "string" && v.length) return [v];
   return [];
 }
+// --- Robust vendor matching helpers ---
+function __norm(s){ return (s||"").toString().trim().toLowerCase(); }
+function __tokens(s){ return __norm(s).split(/\s+/).filter(Boolean); }
+function __uniq(arr){ const seen=new Set(); return arr.filter(x=>{if(seen.has(x)) return false; seen.add(x); return true;}); }
+
+function matchVendorsSmart(bidVendorName, vendors, branchText){
+  const q = __norm(bidVendorName);
+  if (!q || !Array.isArray(vendors)) return [];
+
+  const qTokens = __tokens(q);
+
+  // 1) exact (case-insensitive, trimmed)
+  const exact = vendors.filter(v => __norm(v?.name) === q);
+  if (exact.length) return exact;
+
+  // 2) token-overlap (every token in q appears in vendor name tokens)
+  //    e.g., "lansing" ⟹ matches "lansing building products"
+  let tokenMatches = vendors.filter(v => {
+    const vt = __tokens(v?.name);
+    return qTokens.every(t => vt.includes(t));
+  });
+
+  // 3) if still empty, substring fallback
+  if (!tokenMatches.length) {
+    tokenMatches = vendors.filter(v => __norm(v?.name).includes(q) || __norm(v?.email).includes(q));
+  }
+
+  // 4) rank: token matches that start with q rank higher
+  tokenMatches.sort((a,b)=>{
+    const an = __norm(a?.name), bn = __norm(b?.name);
+    const aStarts = an.startsWith(q) ? 1 : 0;
+    const bStarts = bn.startsWith(q) ? 1 : 0;
+    if (bStarts !== aStarts) return bStarts - aStarts;
+    // then shorter names first (prefer "lansing" over "lansing building products" if both)
+    return an.length - bn.length;
+  });
+
+  // 5) branch-aware narrowing but never drop to zero
+  const branch = __norm(branchText);
+  if (branch && tokenMatches.length > 1) {
+    const narrowed = tokenMatches.filter(v =>
+      __norm(v?.name).includes(branch) || __norm(v?.email).includes(branch)
+    );
+    if (narrowed.length) return __uniq(narrowed);
+  }
+
+  return __uniq(tokenMatches);
+}
 
 // ---------- SAFE replacement for fetchDetailsByBidName ----------
 async function fetchDetailsByBidName(bidNameInput) {
@@ -1042,7 +1161,7 @@ async function fetchDetailsByBidName(bidNameInput) {
       ? bidNameInput
       : (bidNameInput?.companyName || bidNameInput?.text || "");
 
-    // 🔑 Normalize aggressively so trailing/leading spaces never break search
+    // ✅ Normalize aggressively (trim + collapse spaces)
     const bidName = normalizeBid(bidNameRaw);
     if (!bidName) {
       console.warn("⚠️ fetchDetailsByBidName called without a bid name.");
@@ -1053,12 +1172,8 @@ async function fetchDetailsByBidName(bidNameInput) {
       clearAllDynamicSpans();
     }
 
-    // Use escaped, normalized bid for exact match
-    const safeBid = (typeof escapeForAirtableFilter === "function")
-      ? escapeForAirtableFilter(bidName)
-      : bidName.replace(/"/g, '\\"');
-
-    const filterFormula = `AND({Bid Name} = "${safeBid}", {Outcome}='Win')`;
+    // ✅ whitespace-tolerant equality formula
+    const filterFormula = buildBidNameEqualsFormula(bidName);
 
     const records = await fetchAirtableData(
       typeof bidBaseName !== "undefined" ? bidBaseName : baseId,
@@ -1072,12 +1187,12 @@ async function fetchDetailsByBidName(bidNameInput) {
       return {};
     }
 
-    // Prefer exact (case-insensitive) match among returns, fallback to first
+    // Prefer exact (case-insensitive), fallback to first
     const exact = records.find(r => normalizeBid(r?.fields?.["Bid Name"]).toLowerCase() === bidName.toLowerCase());
     const chosen = exact || records[0];
     const fields = chosen?.fields || {};
 
-    // --- (unchanged: safe getters) ---
+    // --- unpack fields you use elsewhere ---
     const builder               = getFieldStr(fields, "Builder") || "Unknown Builder";
     const gmEmailRaw            = getArrayOrEmpty(fields, "GM Email");
     const gmEmail               = gmEmailRaw[0] || "Branch Staff@Vanir.com";
@@ -1092,7 +1207,6 @@ async function fetchDetailsByBidName(bidNameInput) {
     const gmNamed               = getFieldStr(fields, "GM Named");
     const gm                    = gmNamed || (typeof deriveNameFromEmail === "function" ? deriveNameFromEmail(gmEmail) : "");
 
-    // Subcontractors by branch
     if (branch && typeof fetchSubcontractorSuggestions === "function") {
       await fetchSubcontractorSuggestions(branch);
       if (typeof updateSubcontractorAutocomplete === "function") {
@@ -1100,65 +1214,57 @@ async function fetchDetailsByBidName(bidNameInput) {
       }
     }
 
-    // Vendor matching (unchanged logic, still safe)
-    const vendorRaw = getFieldStr(fields, "vendor");
-    const vendorNormalized = (vendorRaw || "").toLowerCase().trim();
-    const vendors = (window.vendorData || []).slice();
-    let matchingVendors = [];
+    // ---------- VENDOR RESOLUTION (linked IDs first, then name match) ----------
+    const vendors     = window.vendorData || [];
+    const vendorById  = window.vendorById || {};
+    const branchText  = (document.querySelector(".branchContainer")?.textContent || "");
+    const linkedIds   = getArrayOrEmpty(fields, "Vendor Pricing to Use?"); // linked-record field → array of recIDs
+    let resolvedVendor = null;
 
-    if (vendors.length && vendorNormalized) {
-      matchingVendors = vendors.filter(v => (v?.name || "").toLowerCase().trim() === vendorNormalized);
-      if (!matchingVendors.length) {
-        const firstWord = vendorNormalized.split(/\s+/)[0] || "";
-        if (firstWord) {
-          matchingVendors = vendors.filter(v => {
-            const n = (v?.name || "").toLowerCase();
-            const e = (v?.email || "").toLowerCase();
-            return n.includes(firstWord) || e.includes(firstWord);
-          });
+    // A) If a linked ID exists, resolve by ID immediately
+    if (Array.isArray(linkedIds) && linkedIds.length) {
+      const recId = String(linkedIds[0] || "");
+      if (recId && vendorById[recId]) {
+        resolvedVendor = vendorById[recId];
+        renderVendorChosen(resolvedVendor.name || "", resolvedVendor.email || "");
+        console.log("[vendor-match]", { bidVendor: recId, branchText, found: [resolvedVendor.name || "(by id)"] });
+      }
+    }
+
+    // B) If unresolved (no ID or not found), try name-based matching
+    if (!resolvedVendor) {
+      // Some bases also store a text helper; try to read it if present
+      const vendorRawText = getFieldStr(fields, "Vendor Pricing to Use? (Name)") ||
+                            getFieldStr(fields, "Vendor Pricing to Use Text") ||
+                            getFieldStr(fields, "Vendor Pricing to Use?") || ""; // may be 'rec...' but matcher will handle gracefully
+
+      const matches = matchVendorsSmart(vendorRawText, vendors, branchText);
+
+      if (matches.length === 1) {
+        const m = matches[0];
+        resolvedVendor = m;
+        renderVendorChosen(m?.name || "", m?.email || "");
+      } else if (matches.length > 1) {
+        if (typeof renderMatchingVendorsToDropdown === "function") {
+          renderMatchingVendorsToDropdown(matches);
         }
-      }
-    }
-
-    if (typeof waitForElement === "function") {
-      await waitForElement(".gmNameContainer");
-    }
-
-    if (matchingVendors.length === 1) {
-      const matched = matchingVendors[0];
-      window.currentVendorEmail = matched?.email || "";
-      if (typeof updateMultipleSpans === "function") {
-        updateMultipleSpans(".bidNameContainer", bidName);
-        updateMultipleSpans(".vendorNameContainer", matched?.name || "");
-        updateMultipleSpans(".vendorEmailWrapper", matched?.email ? ` <${matched.email}>` : "");
+        renderVendorChosen("", ""); // show Change/Search/Clear actions
       } else {
-        document.querySelectorAll(".bidNameContainer").forEach(el => el.textContent = bidName);
-        document.querySelectorAll(".vendorNameContainer").forEach(el => el.textContent = matched?.name || "");
-        document.querySelectorAll(".vendorEmailWrapper").forEach(el => el.textContent = matched?.email ? ` <${matched.email}>` : "");
+        if (typeof renderMatchingVendorsToDropdown === "function") {
+          renderMatchingVendorsToDropdown(vendors); // let user pick from full list
+        }
+        renderVendorChosen("", "");
       }
-    } else if (matchingVendors.length > 1) {
-      const branchText = (document.querySelector(".branchContainer")?.textContent || "").toLowerCase().trim();
-      let narrowed = matchingVendors;
-      if (branchText) {
-        narrowed = matchingVendors.filter(v =>
-          (v?.name || "").toLowerCase().includes(branchText) ||
-          (v?.email || "").toLowerCase().includes(branchText)
-        );
-      }
-      if (narrowed.length === 1) {
-        const matched = narrowed[0];
-        window.currentVendorEmail = matched?.email || "";
-        document.querySelectorAll(".vendorNameContainer").forEach(el => el.textContent = matched?.name || "");
-        document.querySelectorAll(".vendorEmailWrapper").forEach(el => el.textContent = matched?.email ? ` <${matched.email}>` : "");
-      } else if (typeof renderMatchingVendorsToDropdown === "function") {
-        renderMatchingVendorsToDropdown(matchingVendors);
-      }
-    } else {
-      if (typeof renderMatchingVendorsToDropdown === "function") {
-        renderMatchingVendorsToDropdown(vendors);
-      }
-    }
 
+      console.log("[vendor-match]", {
+        bidVendor: vendorRawText,
+        branchText,
+        found: (matches || []).map(v=>v.name)
+      });
+    }
+    // ---------- /vendor resolution ----------
+
+    // UI updates you already do
     if (typeof updateMultipleSpans === "function") {
       updateMultipleSpans(".gmNameContainer", gm);
       updateMultipleSpans(".gmEmailContainer", gmEmail);
@@ -1179,7 +1285,7 @@ async function fetchDetailsByBidName(bidNameInput) {
         materialType,
         numberOfLots,
         anticipatedStartDate,
-        vendorRaw,
+        resolvedVendor?.name || getFieldStr(fields, "Vendor Pricing to Use?") || "",
         anticipatedDuration,
         gm
       );
@@ -1193,7 +1299,7 @@ async function fetchDetailsByBidName(bidNameInput) {
       materialType,
       numberOfLots,
       anticipatedStartDate,
-      vendorRaw,
+      vendorRaw: resolvedVendor?.name || "",
       AnticipatedDuration: anticipatedDuration,
       gm
     };
@@ -1202,6 +1308,8 @@ async function fetchDetailsByBidName(bidNameInput) {
     return {};
   }
 }
+
+
 
 
 
@@ -1275,39 +1383,152 @@ function showVendorSelectionDropdown(vendorMatches) {
 }
 
 function renderMatchingVendorsToDropdown(matchingVendors) {
-    const dropdown = document.querySelector('.vendor-autocomplete-dropdown');
-    if (!dropdown) {
-        console.error("Dropdown container not found.");
-        return;
-    }
+  // 1) Get the dropdown first (avoid TDZ)
+  const dropdown = document.querySelector('.vendor-autocomplete-dropdown');
+  if (!dropdown) {
+    console.error("Dropdown container not found.");
+    return;
+  }
 
-    dropdown.innerHTML = ''; // Clear any previous results
+  // 2) Clear and build header
+  dropdown.innerHTML = '';
 
-    if (!Array.isArray(matchingVendors) || matchingVendors.length === 0) {
-        dropdown.innerHTML = '<p>No matching vendors found.</p>';
-        return;
-    }
+  const header = document.createElement('div');
+  header.style.display = 'flex';
+  header.style.justifyContent = 'space-between';
+  header.style.alignItems = 'center';
+  header.style.padding = '6px 10px';
+  header.style.borderBottom = '1px solid #eee';
 
-    matchingVendors.forEach(vendor => {
-        const option = document.createElement('div');
-        option.className = 'vendor-autocomplete-option';
-        option.style.cursor = 'pointer';
-        option.style.padding = '8px 10px';
-        option.style.borderBottom = '1px solid #eee';
-        const email = vendor.email ? `<br><small>${vendor.email}</small>` : `<br><small style="color:gray;">(no email)</small>`;
-        option.innerHTML = `<strong>${vendor.name}</strong>${email}`;
+  const title = document.createElement('strong');
+  title.textContent = 'Matches';
 
-        option.addEventListener('click', () => {
-            window.currentVendorEmail = vendor.email;
-            document.querySelectorAll('.vendorNameContainer').forEach(el => el.textContent = vendor.name);
-            document.querySelectorAll('.vendorEmailWrapper').forEach(el => el.textContent = ` <${vendor.email || ''}>`);
-            dropdown.innerHTML = ''; // Close dropdown
-        });
+  const allBtn = document.createElement('button');
+  allBtn.type = 'button';
+  allBtn.textContent = 'Search all vendors';
+  allBtn.style.padding = '4px 8px';
+  allBtn.style.border = '1px solid #ddd';
+  allBtn.style.borderRadius = '6px';
+  allBtn.style.background = '#fff';
+allBtn.onclick = () => showVendorSelectionDropdown(window.vendorData || []);
 
-        dropdown.appendChild(option);
+  header.appendChild(title);
+  header.appendChild(allBtn);
+  dropdown.appendChild(header);
+
+  // 3) Empty state
+  if (!Array.isArray(matchingVendors) || matchingVendors.length === 0) {
+    const empty = document.createElement('p');
+    empty.style.margin = '8px 10px';
+    empty.style.color = '#666';
+    empty.textContent = 'No matching vendors found.';
+    dropdown.appendChild(empty);
+    dropdown.style.display = 'block';
+    return;
+  }
+
+  // 4) Options
+  matchingVendors.forEach(vendor => {
+    const option = document.createElement('div');
+    option.className = 'vendor-autocomplete-option';
+    option.style.cursor = 'pointer';
+    option.style.padding = '8px 10px';
+    option.style.borderBottom = '1px solid #eee';
+
+    const email = vendor.email
+      ? `<br><small>${vendor.email}</small>`
+      : `<br><small style="color:gray;">(no email)</small>`;
+
+    option.innerHTML = `<strong>${vendor.name || ''}</strong>${email}`;
+
+    option.addEventListener('click', () => {
+      renderVendorChosen(vendor.name || '', vendor.email || '');
+      dropdown.innerHTML = '';       // close dropdown
+      dropdown.style.display = 'none';
     });
 
-    dropdown.style.display = 'block';
+    dropdown.appendChild(option);
+  });
+
+  dropdown.style.display = 'block';
+}
+
+// Open a vendor picker. If list is omitted, show ALL vendors.
+function openVendorPicker(list) {
+  const pool = Array.isArray(list) && list.length ? list : (window.vendorData || []);
+  if (!pool.length) {
+    console.warn("No vendor data loaded yet.");
+    return;
+  }
+  // Reuse your dropdown renderer or the larger panel as you prefer:
+  // Always use big searchable panel for manual picking
+  if (typeof showVendorSelectionDropdown === "function") {
+    showVendorSelectionDropdown(pool);
+ } else if (typeof renderMatchingVendorsToDropdown === "function") {
+    renderMatchingVendorsToDropdown(pool);
+  }
+}
+
+// Render chosen vendor + attach "Change", "Search all", and "Clear"
+function renderVendorChosen(name, email) {
+  document.querySelectorAll(".vendorNameContainer").forEach(el => el.textContent = name || "");
+  document.querySelectorAll(".vendorEmailWrapper").forEach(el => el.textContent = email ? ` <${email}>` : "");
+
+  window.currentVendorEmail = email || "";
+
+  // Controls host
+  const host = document.getElementById("vendorEmailContainer") || document.querySelector(".vendorEmailWrapper")?.parentElement;
+  if (!host) return;
+
+  // Remove previous controls if any
+  host.querySelector(".vendor-actions")?.remove();
+
+  // Build action bar
+  const bar = document.createElement("div");
+  bar.className = "vendor-actions";
+  bar.style.display = "flex";
+  bar.style.flexWrap = "wrap";
+  bar.style.gap = "8px";
+  bar.style.marginTop = "6px";
+
+  const btnChange = document.createElement("button");
+  btnChange.type = "button";
+  btnChange.textContent = "Change vendor";
+  btnChange.className = "btn-secondary";
+  btnChange.style.padding = "6px 10px";
+  btnChange.style.border = "1px solid #ddd";
+  btnChange.style.borderRadius = "8px";
+  btnChange.style.background = "#fff";
+  btnChange.onclick = () => openVendorPicker();
+
+  const btnSearchAll = document.createElement("button");
+  btnSearchAll.type = "button";
+  btnSearchAll.textContent = "Search all vendors";
+  btnSearchAll.className = "btn-secondary";
+  btnSearchAll.style.padding = "6px 10px";
+  btnSearchAll.style.border = "1px solid #ddd";
+  btnSearchAll.style.borderRadius = "8px";
+  btnSearchAll.style.background = "#fff";
+btnSearchAll.onclick = () => showVendorSelectionDropdown(window.vendorData || []);
+
+  const btnClear = document.createElement("button");
+  btnClear.type = "button";
+  btnClear.textContent = "Clear";
+  btnClear.className = "btn-tertiary";
+  btnClear.style.padding = "6px 10px";
+  btnClear.style.border = "1px solid #eee";
+  btnClear.style.borderRadius = "8px";
+  btnClear.style.background = "#fafafa";
+  btnClear.onclick = () => {
+    renderVendorChosen("", "");
+    // Optionally reopen picker immediately:
+    openVendorPicker();
+  };
+
+  bar.appendChild(btnChange);
+  bar.appendChild(btnSearchAll);
+  bar.appendChild(btnClear);
+  host.appendChild(bar);
 }
 
   function updateSubcontractorAutocomplete() {
@@ -1378,6 +1599,18 @@ function createAutocompleteInput(placeholder, suggestions, type, fetchDetailsCal
     input.style.color = "#bbb";
     input.style.cursor = "not-allowed";
   }
+// Inside createAutocompleteInput(...) after input is created
+input.addEventListener("blur", () => {
+  const n = normalizeBid(input.value);
+  if (n !== input.value) input.value = n;
+});
+
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    const n = normalizeBid(input.value);
+    if (n !== input.value) input.value = n;
+  }
+});
 
   const dropdown = document.createElement("div");
   dropdown.classList.add(`${type}-autocomplete-dropdown`, "autocomplete-dropdown");
@@ -1678,16 +1911,25 @@ if (emailTemplateContainer) {
   });
 }
 // === USER-DRIVEN REFRESH ===
+// === USER-DRIVEN REFRESH (force network) ===
 document.getElementById("refreshBidsBtn")?.addEventListener("click", async (ev) => {
   const btn = ev.currentTarget;
   try {
     setBtnBusy(btn, true);
     updateDataStatus("ok", "Refreshing…");
 
-    // Pull fresh vendors and bids in parallel
-    await Promise.all([
-      fetchAllVendorData(),      // fills sessionStorage + window.vendorData
-      fetchBidNameSuggestions(), // fills localStorage + window.bidNameSuggestions
+    // Optional: clear caches first (so you see counts jump immediately)
+    try {
+      localStorage.removeItem("cachedBidNames");
+      localStorage.removeItem("cachedBidNamesTimestamp");
+      sessionStorage.removeItem("cachedVendors");
+      sessionStorage.removeItem("cachedVendorsTimestamp");
+    } catch {}
+
+    // Pull fresh vendors and bids in parallel, forcing network
+    const [{ uniqueNameCount }, _vendors] = await Promise.all([
+      fetchBidNameSuggestions({ force: true }),     // bypass cache
+      fetchAllVendorData({ force: true }),          // bypass cache
     ]);
 
     // Refill autocomplete with the new list
@@ -1696,8 +1938,7 @@ document.getElementById("refreshBidsBtn")?.addEventListener("click", async (ev) 
     // Ensure the bid input (if initially disabled) is now enabled
     try { window.bidAutocompleteInputWrapper?.enableInput?.(); } catch {}
 
-    const count = (window.bidNameSuggestions || []).length;
-    updateDataStatus("ok", `Loaded ${count} bids just now`);
+    updateDataStatus("ok", `Loaded ${uniqueNameCount} unique bids just now`);
   } catch (err) {
     console.error("[refresh] failed:", err);
     updateDataStatus("error", "Refresh failed — check console");
@@ -1707,28 +1948,30 @@ document.getElementById("refreshBidsBtn")?.addEventListener("click", async (ev) 
 });
 
 
+
+// Example boot that prefers cache, but can be flipped to "live first"
 document.addEventListener("DOMContentLoaded", async () => {
   try {
     renderBidInputImmediately();
     hydrateBidSuggestionsFromCache();
 
-    // Start both
+    const FORCE_LIVE_ON_BOOT = false; // flip to true if you want a guaranteed refetch
+
     await Promise.all([
-      fetchAllVendorData(),
-      fetchBidNameSuggestions(),
+      fetchAllVendorData({ force: FORCE_LIVE_ON_BOOT }),
+      fetchBidNameSuggestions({ force: FORCE_LIVE_ON_BOOT }),
     ]);
 
-    // Refill UI
     updateAutocompleteOptions("bid", window.bidNameSuggestions || []);
     window.bidAutocompleteInputWrapper?.enableInput?.();
 
-    // Your other UI wiring...
     createVendorAutocompleteInput();
-    autoProgressLoading?.(isBidInputVisible); // if you still want a soft animation in parallel
+    autoProgressLoading?.(isBidInputVisible);
   } catch (err) {
     console.error("[boot] failed:", err);
   }
 });
+
 
 
 function wireBidInput() {
@@ -1842,7 +2085,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     initializeBidAutocomplete();
 
     // 5️⃣ Create Vendor Autocomplete
-    createVendorAutocompleteInput();
 
     // 6️⃣ Start progress animation
     autoProgressLoading(isBidInputVisible);
