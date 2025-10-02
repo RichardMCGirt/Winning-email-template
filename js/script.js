@@ -231,7 +231,7 @@ window.AIRTABLE_API_KEY  = window.AIRTABLE_API_KEY  || airtableApiKey;
 // Set these to the base/table that actually hold your Vendors.
 // If your Vendors live in the same base as bids:
 window.AT_VENDOR_BASE_ID  = window.AT_VENDOR_BASE_ID  || "appK9gZS77OmsIK50";  // Vendors base id
-window.AT_VENDOR_TABLE_ID = window.AT_VENDOR_TABLE_ID || "tbllFcCzQfRATm6dI";  // Vendors table id (field "Name", email lookup)
+window.AT_VENDOR_TABLE_ID = window.AT_VENDOR_TABLE_ID || "tblYl6d17rYWBJqlV";  // Vendors table id (field "Name", email lookup)
 
 // Ensure vendorData is declared before assignment/usage
 let vendorData = [];
