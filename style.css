@@ -291,7 +291,9 @@ body.dark-mode #toggleLabel {
     font-weight: bold;
     color: #007bff;
 }
-
+.branchContainer{
+    color: rgb(54, 52, 52);
+}
 /* Buttons */
 button {
     display: inline-block;

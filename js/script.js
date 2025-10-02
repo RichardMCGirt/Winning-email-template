@@ -392,7 +392,7 @@ function hydrateBidSuggestionsFromCache() {
     updateDataStatus(stale ? "warn" : "ok",
       stale
         ? `Showing cached bids • Last updated ${ts} • Click "Refresh Bids" to update`
-        : `Loaded ${rows.length} bids from cache • Updated ${ts}`
+        : `Loaded ${rows.length} bids  • Updated ${ts}`
     );
   } else {
     updateDataStatus("");
@@ -1021,7 +1021,7 @@ async function fetchBidNameSuggestions(opts = {}) {
   try { VanirLoad.done('bids'); } catch {}
 
   // ✅ Show BOTH numbers so it's clear why 2,780 ≠ 2,923
-  updateDataStatus("ok", `Fetched ${rawRecordCount} records • ${unique.length} unique bid names`);
+  updateDataStatus("ok", `Fetched ${rawRecordCount} records `);
 
   return { rawRecordCount, uniqueNameCount: unique.length, fromCache: false };
 }
@@ -1594,15 +1594,17 @@ function renderVendorChosen(name, email) {
   btnChange.style.background = "#fff";
   btnChange.onclick = () => openVendorPicker();
 
-  const btnSearchAll = document.createElement("button");
-  btnSearchAll.type = "button";
-  btnSearchAll.textContent = "Search all vendors";
-  btnSearchAll.className = "btn-secondary";
-  btnSearchAll.style.padding = "6px 10px";
-  btnSearchAll.style.border = "1px solid #ddd";
-  btnSearchAll.style.borderRadius = "8px";
-  btnSearchAll.style.background = "#fff";
+const btnSearchAll = document.createElement("button");
+btnSearchAll.type = "button";
+btnSearchAll.textContent = "Search all vendors";
+btnSearchAll.className = "btn-secondary";
+btnSearchAll.style.padding = "6px 10px";
+btnSearchAll.style.border = "1px solid #ddd";
+btnSearchAll.style.borderRadius = "8px";
+btnSearchAll.style.background = "#fff";
+btnSearchAll.style.display = "none";
 btnSearchAll.onclick = () => showVendorSelectionDropdown(window.vendorData || []);
+
 
   const btnClear = document.createElement("button");
   btnClear.type = "button";
@@ -3905,7 +3907,7 @@ async function waitForElement(selector, timeout = 5000) {
         <div class="vl-sub">Fetching winning bids, vendors, and wiring inputs.</div>
         <div class="vl-bar"><div class="vl-fill" id="vlFill"></div></div>
         <div class="vl-meta">
-          <div class="vl-rows" id="vlRows">0 records • 0 pages</div>
+          <div class="vl-rows" id="vlRows">0 records</div>
           <div class="vl-eta" id="vlEta">ETA —</div>
         </div>
         <div class="vl-steps" id="vlSteps">
@@ -3923,13 +3925,13 @@ async function waitForElement(selector, timeout = 5000) {
     el.classList.add(state);
   }
   function fmt(n){ return (n||0).toLocaleString(); }
-  function fmtTime(sec){
-    if (!Number.isFinite(sec) || sec <= 0) return '—';
-    if (sec < 60) return `${Math.ceil(sec)}s`;
-    const m = Math.floor(sec/60), s = Math.ceil(sec%60);
-    return `${m}m ${s}s`;
-  }
-
+function fmtTime(sec){
+  if (!Number.isFinite(sec) || sec <= 0) return '—';
+  if (sec < 1.5) return '<2s';
+  if (sec < 60) return `${Math.round(sec)}s`;
+  const m = Math.floor(sec/60), s = Math.round(sec%60);
+  return `${m}m ${s}s`;
+}
   class AdaptiveTask {
     constructor(name, weight){
       this.name = name; this.weight = weight;
@@ -4011,8 +4013,8 @@ async function waitForElement(selector, timeout = 5000) {
       const totalPages = (b.pages + v.pages);
       if (rows) rows.textContent = `${fmt(totalRecs)} records • ${fmt(totalPages)} pages`;
 
-      if (bidsMeta)   bidsMeta.textContent = `${fmt(b.records)} rec • ${fmt(b.pages)}/${fmt(Math.max(b.pages, b.estimateTotalPages))} pg`;
-      if (vendMeta)   vendMeta.textContent = `${fmt(v.records)} rec • ${fmt(v.pages)}/${fmt(Math.max(v.pages, v.estimateTotalPages))} pg`;
+      if (bidsMeta)   bidsMeta.textContent = `${fmt(b.records)} rec `;
+      if (vendMeta)   vendMeta.textContent = `${fmt(v.records)} rec `;
 
       // ETA: sum of per-task ETA (weighted by how incomplete they are)
       const etaB = b.done ? 0 : b.etaSeconds();
