@@ -2418,8 +2418,9 @@ mike.raszmann@vanirinstalledsales.com
   Management
 </span>
 <span class="branchEmailContainer-label"> </span><span class="branchEmailContainer"></span>
-<span class="acmEmailContainer"></span>
 <span class="estimatesEmailContainer-label"> </span><span class="estimatesEmailContainer"></span>
+
+<span class="acmEmailContainer"></span>
 
         </h2>
 
@@ -3927,8 +3928,8 @@ async function waitForElement(selector, timeout = 5000) {
   function fmt(n){ return (n||0).toLocaleString(); }
 function fmtTime(sec){
   if (!Number.isFinite(sec) || sec <= 0) return '—';
-  if (sec < 1.5) return '<2s';
-  if (sec < 60) return `${Math.round(sec)}s`;
+  if (sec < 1.5) return '<1m';
+  if (sec < 30) return `${Math.round(sec)}s`;
   const m = Math.floor(sec/60), s = Math.round(sec%60);
   return `${m}m ${s}s`;
 }
