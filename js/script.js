@@ -1420,7 +1420,6 @@ function showVendorSelectionDropdown(vendorMatches) {
   wrapper.style.border = "1px solid #ddd";
   wrapper.style.borderRadius = "8px";
   wrapper.style.padding = "10px";
-  wrapper.style.background = "#fff";
   wrapper.style.maxHeight = "320px";
   wrapper.style.overflow = "auto";
   wrapper.style.boxShadow = "0 6px 18px rgba(0,0,0,.08)";
@@ -1564,19 +1563,15 @@ function openVendorPicker(list) {
 
 // Render chosen vendor + attach "Change", "Search all", and "Clear"
 function renderVendorChosen(name, email) {
-  document.querySelectorAll(".vendorNameContainer").forEach(el => el.textContent = name || "");
-  document.querySelectorAll(".vendorEmailWrapper").forEach(el => el.textContent = email ? ` <${email}>` : "");
+  // ← replace previous direct DOM writes with the single setter
+  setVendor(name, email);
 
-  window.currentVendorEmail = email || "";
-
-  // Controls host
-  const host = document.getElementById("vendorEmailContainer") || document.querySelector(".vendorEmailWrapper")?.parentElement;
+  const host = document.getElementById("vendorEmailContainer")
+            || document.querySelector(".vendorEmailWrapper")?.parentElement;
   if (!host) return;
 
-  // Remove previous controls if any
   host.querySelector(".vendor-actions")?.remove();
 
-  // Build action bar
   const bar = document.createElement("div");
   bar.className = "vendor-actions";
   bar.style.display = "flex";
@@ -1586,25 +1581,24 @@ function renderVendorChosen(name, email) {
 
   const btnChange = document.createElement("button");
   btnChange.type = "button";
-  btnChange.textContent = "Change vendor";
+  btnChange.textContent = "Select vendor";
   btnChange.className = "btn-secondary";
   btnChange.style.padding = "6px 10px";
   btnChange.style.border = "1px solid #ddd";
   btnChange.style.borderRadius = "8px";
-  btnChange.style.background = "#fff";
+  btnChange.style.background = "black";
   btnChange.onclick = () => openVendorPicker();
 
-const btnSearchAll = document.createElement("button");
-btnSearchAll.type = "button";
-btnSearchAll.textContent = "Search all vendors";
-btnSearchAll.className = "btn-secondary";
-btnSearchAll.style.padding = "6px 10px";
-btnSearchAll.style.border = "1px solid #ddd";
-btnSearchAll.style.borderRadius = "8px";
-btnSearchAll.style.background = "#fff";
-btnSearchAll.style.display = "none";
-btnSearchAll.onclick = () => showVendorSelectionDropdown(window.vendorData || []);
-
+  const btnSearchAll = document.createElement("button");
+  btnSearchAll.type = "button";
+  btnSearchAll.textContent = "Search all vendors";
+  btnSearchAll.className = "btn-secondary";
+  btnSearchAll.style.padding = "6px 10px";
+  btnSearchAll.style.border = "1px solid #ddd";
+  btnSearchAll.style.borderRadius = "8px";
+  btnSearchAll.style.background = "#fff";
+  btnSearchAll.style.display = "none"; // as you had it
+  btnSearchAll.onclick = () => showVendorSelectionDropdown(window.vendorData || []);
 
   const btnClear = document.createElement("button");
   btnClear.type = "button";
@@ -1613,11 +1607,9 @@ btnSearchAll.onclick = () => showVendorSelectionDropdown(window.vendorData || []
   btnClear.style.padding = "6px 10px";
   btnClear.style.border = "1px solid #eee";
   btnClear.style.borderRadius = "8px";
-  btnClear.style.background = "#fafafa";
+  btnClear.style.background = "black";
   btnClear.onclick = () => {
-    renderVendorChosen("", "");
-    // Optionally reopen picker immediately:
-    openVendorPicker();
+    setVendor("", "");    // keep input + spans cleared
   };
 
   bar.appendChild(btnChange);
@@ -4030,3 +4022,43 @@ function fmtTime(sec){
 
   window.VanirLoad = new AdaptiveLoader();
 })();
+// --- Single source of truth for the chosen vendor ---
+(function () {
+  // Optional shared state (read-only from outside)
+  window.VendorSelection = { name: "", email: "" };
+
+  // Fire a custom event when vendor changes so any UI can react
+  function dispatchVendorChanged() {
+    const ev = new CustomEvent("vendor:changed", {
+      detail: { name: window.VendorSelection.name, email: window.VendorSelection.email }
+    });
+    document.dispatchEvent(ev);
+  }
+
+  // Central setter — call this everywhere instead of manually updating DOM
+  window.setVendor = function setVendor(name = "", email = "") {
+    // 1) update state
+    window.VendorSelection.name  = String(name || "").trim();
+    window.VendorSelection.email = String(email || "").trim();
+    window.currentVendorEmail    = window.VendorSelection.email; // keep your existing global in sync
+
+    // 2) update visible UI
+    document.querySelectorAll(".vendorNameContainer")
+      .forEach(el => el.textContent = window.VendorSelection.name);
+    document.querySelectorAll(".vendorEmailWrapper")
+      .forEach(el => el.textContent = window.VendorSelection.email ? ` <${window.VendorSelection.email}>` : "");
+
+    // 3) keep the input synced (if present)
+    const input = document.querySelector(".vendor-autocomplete-input");
+    if (input) {
+      input.value = window.VendorSelection.name || "";
+    }
+
+    // 4) notify listeners
+    dispatchVendorChanged();
+  };
+})();
+document.addEventListener("vendor:changed", (e) => {
+  const input = document.querySelector(".vendor-autocomplete-input");
+  if (input) input.value = (e.detail?.name || "");
+});

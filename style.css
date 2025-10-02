@@ -34,7 +34,7 @@ body {
   }
 
 .vendor-autocomplete-wrapper {
-  display: flex;
+  display: none;
   align-items: center;
   position: relative;
 }
